@@ -18,5 +18,12 @@ export const env = {
     accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN ?? "15m",
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN ?? "7d",
   },
-  corsOrigin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
+  // Comma-separated list so the Vite dev server and the built PWA preview
+  // can both call the API during development.
+  corsOrigins: (process.env.CORS_ORIGIN ?? "http://localhost:5173,http://localhost:4173")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+  // Optional: AI dashboard personalization is disabled (fails gracefully) until this is set.
+  openaiApiKey: process.env.OPENAI_API_KEY || null,
 };

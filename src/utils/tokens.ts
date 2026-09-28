@@ -13,5 +13,10 @@ export function signRefreshToken(payload: AuthPayload): string {
 }
 
 export function verifyRefreshToken(token: string): AuthPayload {
-  return jwt.verify(token, env.jwt.refreshSecret) as AuthPayload;
+  const decoded = jwt.verify(token, env.jwt.refreshSecret) as AuthPayload & { iat?: number; exp?: number };
+  // jsonwebtoken refuses to sign a payload that already carries iat/exp when
+  // an `expiresIn` option is also given, so strip the claims from the
+  // decoded refresh token before reusing it to mint a new access token.
+  const { iat: _iat, exp: _exp, ...payload } = decoded;
+  return payload;
 }

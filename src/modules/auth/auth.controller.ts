@@ -1,6 +1,7 @@
 import { Router } from "express";
-import { loginSchema, refreshSchema, registerSchema } from "./auth.schemas";
-import { login, registerTenantOwner } from "./auth.service";
+import { loginPhoneSchema, loginSchema, refreshSchema, registerSchema } from "./auth.schemas";
+import { getProfile, login, loginByPhone, registerTenantOwner } from "./auth.service";
+import { requireAuth } from "../../middleware/auth";
 import { verifyRefreshToken } from "../../utils/tokens";
 import { signAccessToken } from "../../utils/tokens";
 
@@ -31,6 +32,29 @@ authRouter.post("/login", async (req, res) => {
     return res.json(result);
   } catch (err) {
     return res.status(401).json({ error: (err as Error).message });
+  }
+});
+
+authRouter.post("/login-phone", async (req, res) => {
+  const parsed = loginPhoneSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  try {
+    const result = await loginByPhone(parsed.data.phone, parsed.data.password);
+    return res.json(result);
+  } catch (err) {
+    return res.status(401).json({ error: (err as Error).message });
+  }
+});
+
+authRouter.get("/me", requireAuth, async (req, res) => {
+  try {
+    const profile = await getProfile(req.auth!.userId);
+    return res.json(profile);
+  } catch (err) {
+    return res.status(404).json({ error: (err as Error).message });
   }
 });
 
