@@ -2,6 +2,7 @@ import { Router } from "express";
 import { Customer } from "../../models/Customer";
 import { requireAuth, requireTenant } from "../../middleware/auth";
 import { createCustomerSchema, updateCustomerSchema } from "./customers.schemas";
+import { getCustomerPortfolio, listCustomersWithStats } from "./customers.service";
 
 export const customersRouter = Router();
 
@@ -12,11 +13,14 @@ customersRouter.use(requireAuth, requireTenant);
 
 customersRouter.get("/", async (req, res) => {
   const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  const filter: Record<string, unknown> = { tenantId: req.auth!.tenantId };
-  if (q) filter.name = { $regex: q, $options: "i" };
-
-  const customers = await Customer.find(filter).sort({ createdAt: -1 });
+  const customers = await listCustomersWithStats(req.auth!.tenantId!, q || undefined);
   res.json(customers);
+});
+
+customersRouter.get("/:id/portfolio", async (req, res) => {
+  const portfolio = await getCustomerPortfolio(req.auth!.tenantId!, req.params.id);
+  if (!portfolio) return res.status(404).json({ error: "Customer not found" });
+  res.json(portfolio);
 });
 
 customersRouter.get("/:id", async (req, res) => {

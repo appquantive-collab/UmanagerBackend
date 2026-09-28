@@ -1,7 +1,9 @@
 import { Router } from "express";
+import QRCode from "qrcode";
 import { Product } from "../../models/Product";
 import { requireAuth, requireTenant } from "../../middleware/auth";
 import { createProductSchema, updateProductSchema } from "./products.schemas";
+import { generateSku } from "../../utils/sku";
 
 export const productsRouter = Router();
 
@@ -21,12 +23,27 @@ productsRouter.get("/:id", async (req, res) => {
   res.json(product);
 });
 
+// Encodes the product's SKU as a scannable QR code — printed and stuck on
+// the item, then scanned during stock counts or sales to identify it.
+productsRouter.get("/:id/qr", async (req, res) => {
+  const product = await Product.findOne({ _id: req.params.id, tenantId: req.auth!.tenantId });
+  if (!product) return res.status(404).json({ error: "Product not found" });
+
+  try {
+    const dataUrl = await QRCode.toDataURL(product.sku, { width: 400, margin: 1 });
+    res.json({ sku: product.sku, qrDataUrl: dataUrl });
+  } catch {
+    res.status(500).json({ error: "Could not generate QR code" });
+  }
+});
+
 productsRouter.post("/", async (req, res) => {
   const parsed = createProductSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   try {
-    const product = await Product.create({ ...parsed.data, tenantId: req.auth!.tenantId });
+    const sku = parsed.data.sku || generateSku(parsed.data.name);
+    const product = await Product.create({ ...parsed.data, sku, tenantId: req.auth!.tenantId });
     res.status(201).json(product);
   } catch (err) {
     res.status(409).json({ error: (err as Error).message });

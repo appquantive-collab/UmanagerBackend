@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { Warehouse } from "../../models/Warehouse";
 import { requireAuth, requireTenant } from "../../middleware/auth";
+import { listWarehousesWithStats } from "./warehouses.service";
 
 export const warehousesRouter = Router();
 
@@ -13,22 +14,7 @@ const createWarehouseSchema = z.object({
 });
 
 warehousesRouter.get("/", async (req, res) => {
-  const warehouses = await Warehouse.find({ tenantId: req.auth!.tenantId, isActive: true }).sort({
-    isDefault: -1,
-    name: 1,
-  });
-
-  // Every tenant needs at least one warehouse to record stock against; create
-  // a default on first access rather than forcing a setup step before use.
-  if (warehouses.length === 0) {
-    const created = await Warehouse.create({
-      tenantId: req.auth!.tenantId,
-      name: "Main Warehouse",
-      isDefault: true,
-    });
-    return res.json([created]);
-  }
-
+  const warehouses = await listWarehousesWithStats(req.auth!.tenantId!);
   res.json(warehouses);
 });
 

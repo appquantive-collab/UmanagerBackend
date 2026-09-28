@@ -5,11 +5,47 @@ export type TenantStatus = "trial" | "active" | "suspended";
 export type BusinessCategory =
   | "fmcg"
   | "electronics"
+  | "mobile_accessories"
   | "pharma"
   | "apparel"
+  | "footwear"
+  | "textiles_fabric"
   | "auto_parts"
+  | "two_wheeler_parts"
   | "grocery"
   | "hardware"
+  | "sanitary_plumbing"
+  | "electrical_goods"
+  | "paints_chemicals"
+  | "building_materials"
+  | "furniture"
+  | "musical_instruments"
+  | "sports_goods"
+  | "toys_games"
+  | "stationery_books"
+  | "gift_items"
+  | "cosmetics_beauty"
+  | "jewellery_artificial"
+  | "bags_luggage"
+  | "kitchenware_utensils"
+  | "plastic_goods"
+  | "packaging_materials"
+  | "confectionery_bakery"
+  | "dry_fruits_spices"
+  | "tea_coffee"
+  | "dairy_products"
+  | "agro_seeds_fertilizers"
+  | "cattle_feed"
+  | "tiles_sanitaryware"
+  | "glass_hardware"
+  | "computer_it"
+  | "printing_stationery"
+  | "cleaning_supplies"
+  | "fireworks"
+  | "readymade_garments"
+  | "saree_ethnic_wear"
+  | "watches_eyewear"
+  | "religious_puja_items"
   | "other";
 
 export type CustomerType = "wholesale" | "retail" | "both";
@@ -71,7 +107,52 @@ const onboardingSchema = new Schema<BusinessOnboarding>(
     completed: { type: Boolean, default: false },
     category: {
       type: String,
-      enum: ["fmcg", "electronics", "pharma", "apparel", "auto_parts", "grocery", "hardware", "other"],
+      enum: [
+        "fmcg",
+        "electronics",
+        "mobile_accessories",
+        "pharma",
+        "apparel",
+        "footwear",
+        "textiles_fabric",
+        "auto_parts",
+        "two_wheeler_parts",
+        "grocery",
+        "hardware",
+        "sanitary_plumbing",
+        "electrical_goods",
+        "paints_chemicals",
+        "building_materials",
+        "furniture",
+        "musical_instruments",
+        "sports_goods",
+        "toys_games",
+        "stationery_books",
+        "gift_items",
+        "cosmetics_beauty",
+        "jewellery_artificial",
+        "bags_luggage",
+        "kitchenware_utensils",
+        "plastic_goods",
+        "packaging_materials",
+        "confectionery_bakery",
+        "dry_fruits_spices",
+        "tea_coffee",
+        "dairy_products",
+        "agro_seeds_fertilizers",
+        "cattle_feed",
+        "tiles_sanitaryware",
+        "glass_hardware",
+        "computer_it",
+        "printing_stationery",
+        "cleaning_supplies",
+        "fireworks",
+        "readymade_garments",
+        "saree_ethnic_wear",
+        "watches_eyewear",
+        "religious_puja_items",
+        "other",
+      ],
       default: null,
     },
     customerType: { type: String, enum: ["wholesale", "retail", "both"], default: null },

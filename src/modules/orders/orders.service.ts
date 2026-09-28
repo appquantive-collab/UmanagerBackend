@@ -1,12 +1,14 @@
 import { Types } from "mongoose";
 import { Customer } from "../../models/Customer";
 import { Product } from "../../models/Product";
-import { Order } from "../../models/Order";
+import { Order, type OrderStatus } from "../../models/Order";
 import { parseOrderText, type ParsedOrder } from "./order-parser.service";
+import { generateSku } from "../../utils/sku";
 import type { z } from "zod";
-import type { createOrderSchema } from "./orders.schemas";
+import type { createOrderSchema, updateOrderSchema } from "./orders.schemas";
 
 type CreateOrderInput = z.infer<typeof createOrderSchema>;
+type UpdateOrderInput = z.infer<typeof updateOrderSchema>;
 
 export interface ParsePreviewItem {
   productId: string | null;
@@ -65,16 +67,9 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Saving is where products actually get created — the user has already reviewed
-// and confirmed (or edited) every flagged item by this point.
-export async function saveOrder(tenantId: string, userId: string, input: CreateOrderInput) {
-  const customer = await Customer.findOne({ _id: input.customerId, tenantId });
-  if (!customer) {
-    throw new Error("Customer not found");
-  }
-
+async function resolveOrderItems(tenantId: string, items: CreateOrderInput["items"]) {
   const resolvedItems = [];
-  for (const item of input.items) {
+  for (const item of items) {
     let productId: Types.ObjectId;
     let wasAutoCreated = false;
 
@@ -108,7 +103,18 @@ export async function saveOrder(tenantId: string, userId: string, input: CreateO
       wasAutoCreated,
     });
   }
+  return resolvedItems;
+}
 
+// Saving is where products actually get created — the user has already reviewed
+// and confirmed (or edited) every flagged item by this point.
+export async function saveOrder(tenantId: string, userId: string, input: CreateOrderInput) {
+  const customer = await Customer.findOne({ _id: input.customerId, tenantId });
+  if (!customer) {
+    throw new Error("Customer not found");
+  }
+
+  const resolvedItems = await resolveOrderItems(tenantId, input.items);
   const totalAmount = resolvedItems.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
 
   const order = await Order.create({
@@ -126,12 +132,47 @@ export async function saveOrder(tenantId: string, userId: string, input: CreateO
   return order;
 }
 
-function generateSku(name: string): string {
-  const base = name
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 24);
-  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `${base || "ITEM"}-${suffix}`;
+// Orders can only be edited before they've been billed or cancelled — once
+// delivered (billed) or cancelled, the order is a closed historical record.
+export async function updateOrder(tenantId: string, orderId: string, input: UpdateOrderInput) {
+  const order = await Order.findOne({ _id: orderId, tenantId });
+  if (!order) {
+    throw new Error("Order not found");
+  }
+  if (order.status === "delivered" || order.status === "cancelled") {
+    throw new Error(`Cannot edit an order that is already ${order.status}`);
+  }
+
+  if (input.items) {
+    const resolvedItems = await resolveOrderItems(tenantId, input.items);
+    order.items = resolvedItems;
+    order.totalAmount = resolvedItems.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
+  }
+  if (input.notes !== undefined) {
+    order.notes = input.notes;
+  }
+
+  await order.save();
+  return order;
+}
+
+const ALLOWED_STATUS_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  pending: ["confirmed", "cancelled"],
+  confirmed: ["pending", "cancelled"],
+  delivered: [],
+  cancelled: [],
+};
+
+export async function updateOrderStatus(tenantId: string, orderId: string, status: OrderStatus) {
+  const order = await Order.findOne({ _id: orderId, tenantId });
+  if (!order) {
+    throw new Error("Order not found");
+  }
+  if (!ALLOWED_STATUS_TRANSITIONS[order.status].includes(status)) {
+    throw new Error(`Cannot move an order from ${order.status} to ${status}`);
+  }
+
+  order.status = status;
+  await order.save();
+  return order;
 }

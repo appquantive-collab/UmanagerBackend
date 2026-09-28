@@ -3,6 +3,7 @@ import { Order } from "../../models/Order";
 import { Product } from "../../models/Product";
 import { Customer } from "../../models/Customer";
 import { Invoice, type BillType, type InvoiceLineItem, type PaymentMethod } from "../../models/Invoice";
+import { generateSku } from "../../utils/sku";
 
 async function nextInvoiceNumber(tenantId: string): Promise<string> {
   // Per-tenant sequential numbering: INV-0001, INV-0002, ... — count existing
@@ -172,16 +173,6 @@ export async function createBill(tenantId: string, userId: string, input: Create
   }
 
   return invoice;
-}
-
-function generateSku(name: string): string {
-  const base = name
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 24);
-  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `${base || "ITEM"}-${suffix}`;
 }
 
 export async function recordPayment(

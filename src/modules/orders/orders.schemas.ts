@@ -20,3 +20,12 @@ export const createOrderSchema = z.object({
   source: z.enum(["manual", "ai_parsed"]).default("manual"),
   rawText: z.string().max(2000).optional(),
 });
+
+export const updateOrderSchema = z.object({
+  items: z.array(orderLineItemInputSchema).min(1).optional(),
+  notes: z.string().max(1000).optional(),
+});
+
+export const updateOrderStatusSchema = z.object({
+  status: z.enum(["pending", "confirmed", "cancelled"]),
+});

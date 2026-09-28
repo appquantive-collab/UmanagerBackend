@@ -1,8 +1,8 @@
 import { Router } from "express";
 import { Order } from "../../models/Order";
 import { requireAuth, requireTenant } from "../../middleware/auth";
-import { createOrderSchema, parseOrderTextSchema } from "./orders.schemas";
-import { previewOrderFromText, saveOrder } from "./orders.service";
+import { createOrderSchema, parseOrderTextSchema, updateOrderSchema, updateOrderStatusSchema } from "./orders.schemas";
+import { previewOrderFromText, saveOrder, updateOrder, updateOrderStatus } from "./orders.service";
 import { AiNotConfiguredError } from "./order-parser.service";
 
 export const ordersRouter = Router();
@@ -52,6 +52,30 @@ ordersRouter.post("/", async (req, res) => {
   try {
     const order = await saveOrder(req.auth!.tenantId!, req.auth!.userId, parsed.data);
     res.status(201).json(order);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+ordersRouter.patch("/:id", async (req, res) => {
+  const parsed = updateOrderSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  try {
+    const order = await updateOrder(req.auth!.tenantId!, req.params.id, parsed.data);
+    res.json(order);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+ordersRouter.patch("/:id/status", async (req, res) => {
+  const parsed = updateOrderStatusSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  try {
+    const order = await updateOrderStatus(req.auth!.tenantId!, req.params.id, parsed.data.status);
+    res.json(order);
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }

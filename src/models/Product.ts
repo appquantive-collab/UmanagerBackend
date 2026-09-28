@@ -8,6 +8,7 @@ export interface ProductDocument {
   barcode?: string;
   category?: string;
   brand?: string;
+  imageUrl?: string;
   unit: string;
   hsn?: string;
   gstPercent?: number;
@@ -29,6 +30,7 @@ const productSchema = new Schema<ProductDocument>(
     barcode: { type: String, trim: true },
     category: { type: String, trim: true },
     brand: { type: String, trim: true },
+    imageUrl: { type: String, trim: true },
     unit: { type: String, required: true, default: "pcs" },
     hsn: { type: String, trim: true },
     gstPercent: { type: Number, default: 0 },

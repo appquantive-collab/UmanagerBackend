@@ -26,4 +26,8 @@ export const env = {
     .filter(Boolean),
   // Optional: AI dashboard personalization is disabled (fails gracefully) until this is set.
   openaiApiKey: process.env.OPENAI_API_KEY || null,
+  // Optional: product image upload is disabled (fails gracefully) until this is set.
+  // The cloudinary SDK reads CLOUDINARY_URL from the environment itself; this
+  // flag just lets the app know whether that happened.
+  cloudinaryConfigured: Boolean(process.env.CLOUDINARY_URL),
 };
