@@ -4,6 +4,7 @@ import { Product } from "../../models/Product";
 import { Order, type OrderStatus } from "../../models/Order";
 import { parseOrderText, type ParsedOrder } from "./order-parser.service";
 import { generateSku } from "../../utils/sku";
+import { getProducibleQuantity } from "../assembly/assembly.service";
 import type { z } from "zod";
 import type { createOrderSchema, updateOrderSchema } from "./orders.schemas";
 
@@ -106,6 +107,38 @@ async function resolveOrderItems(tenantId: string, items: CreateOrderInput["item
   return resolvedItems;
 }
 
+export interface RawMaterialWarning {
+  productId: string;
+  productName: string;
+  orderedQuantity: number;
+  producibleQuantity: number;
+}
+
+// Checked after saving, never before — an order always saves regardless of
+// raw material availability (per product decision: warn, don't block). Only
+// products with a configured BOM are checked; everything else is skipped.
+async function checkRawMaterialAvailability(
+  tenantId: string,
+  items: { productId: Types.ObjectId; productName: string; quantity: number }[]
+): Promise<RawMaterialWarning[]> {
+  const warnings: RawMaterialWarning[] = [];
+  for (const item of items) {
+    const product = await Product.findOne({ _id: item.productId, tenantId }, { bom: 1 });
+    if (!product || product.bom.length === 0) continue;
+
+    const { producibleQuantity } = await getProducibleQuantity(tenantId, String(item.productId));
+    if (producibleQuantity < item.quantity) {
+      warnings.push({
+        productId: String(item.productId),
+        productName: item.productName,
+        orderedQuantity: item.quantity,
+        producibleQuantity,
+      });
+    }
+  }
+  return warnings;
+}
+
 // Saving is where products actually get created — the user has already reviewed
 // and confirmed (or edited) every flagged item by this point.
 export async function saveOrder(tenantId: string, userId: string, input: CreateOrderInput) {
@@ -129,7 +162,9 @@ export async function saveOrder(tenantId: string, userId: string, input: CreateO
     createdBy: userId,
   });
 
-  return order;
+  const rawMaterialWarnings = await checkRawMaterialAvailability(tenantId, resolvedItems);
+
+  return { order, rawMaterialWarnings };
 }
 
 // Orders can only be edited before they've been billed or cancelled — once

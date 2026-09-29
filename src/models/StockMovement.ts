@@ -12,7 +12,9 @@ export type StockMovementType =
   | "adjustment"
   | "damage"
   | "transfer_in"
-  | "transfer_out";
+  | "transfer_out"
+  | "assembly_consume"
+  | "assembly_produce";
 
 export interface StockMovementDocument {
   _id: Types.ObjectId;
@@ -45,6 +47,8 @@ const stockMovementSchema = new Schema<StockMovementDocument>(
         "damage",
         "transfer_in",
         "transfer_out",
+        "assembly_consume",
+        "assembly_produce",
       ],
       required: true,
     },

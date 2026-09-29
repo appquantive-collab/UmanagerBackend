@@ -1,5 +1,16 @@
 import { Schema, model, Types } from "mongoose";
 
+// A BOM line references another Product (one flagged isRawMaterial: true) and
+// how much of it goes into one unit of the finished product. Raw materials
+// are ordinary Product documents — same StockMovement ledger, same
+// purchase-price/unit fields — just flagged so they render in their own
+// "Raw Materials" tab instead of the sellable catalog.
+export interface BomLine {
+  rawMaterialId: Types.ObjectId;
+  quantity: number;
+  unit: string;
+}
+
 export interface ProductDocument {
   _id: Types.ObjectId;
   tenantId: Types.ObjectId;
@@ -18,9 +29,20 @@ export interface ProductDocument {
   minimumPrice?: number;
   reorderLevel: number;
   isActive: boolean;
+  isRawMaterial: boolean;
+  bom: BomLine[];
   createdAt: Date;
   updatedAt: Date;
 }
+
+const bomLineSchema = new Schema<BomLine>(
+  {
+    rawMaterialId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
+    quantity: { type: Number, required: true, min: 0.001 },
+    unit: { type: String, required: true, default: "pcs" },
+  },
+  { _id: false }
+);
 
 const productSchema = new Schema<ProductDocument>(
   {
@@ -40,6 +62,8 @@ const productSchema = new Schema<ProductDocument>(
     minimumPrice: { type: Number },
     reorderLevel: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true },
+    isRawMaterial: { type: Boolean, default: false, index: true },
+    bom: { type: [bomLineSchema], default: [] },
   },
   { timestamps: true }
 );

@@ -5,6 +5,12 @@ import { z } from "zod";
 const optionalText = () =>
   z.preprocess((val) => (val === "" ? undefined : val), z.string().optional());
 
+const bomLineSchema = z.object({
+  rawMaterialId: z.string().min(1),
+  quantity: z.number().positive(),
+  unit: z.string().min(1).default("pcs"),
+});
+
 export const createProductSchema = z.object({
   name: z.string().min(1),
   sku: optionalText(),
@@ -20,6 +26,8 @@ export const createProductSchema = z.object({
   retailPrice: z.number().min(0),
   minimumPrice: z.number().min(0).optional(),
   reorderLevel: z.number().min(0).default(0),
+  isRawMaterial: z.boolean().default(false),
+  bom: z.array(bomLineSchema).default([]),
 });
 
 export const updateProductSchema = createProductSchema.partial();

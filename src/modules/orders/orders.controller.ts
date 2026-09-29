@@ -50,8 +50,8 @@ ordersRouter.post("/", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   try {
-    const order = await saveOrder(req.auth!.tenantId!, req.auth!.userId, parsed.data);
-    res.status(201).json(order);
+    const { order, rawMaterialWarnings } = await saveOrder(req.auth!.tenantId!, req.auth!.userId, parsed.data);
+    res.status(201).json({ ...order.toObject(), rawMaterialWarnings });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
