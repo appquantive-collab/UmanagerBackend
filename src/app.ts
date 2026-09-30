@@ -17,6 +17,8 @@ import { staffRouter } from "./modules/staff/staff.controller";
 import { catalogRouter } from "./modules/catalog/catalog.controller";
 import { uploadsRouter } from "./modules/uploads/uploads.controller";
 import { assemblyRouter } from "./modules/assembly/assembly.controller";
+import { attendanceRouter } from "./modules/attendance/attendance.controller";
+import { payrollRouter } from "./modules/payroll/payroll.controller";
 
 export function createApp() {
   const app = express();
@@ -42,6 +44,8 @@ export function createApp() {
   app.use("/api/catalog", catalogRouter);
   app.use("/api/uploads", uploadsRouter);
   app.use("/api/assembly", assemblyRouter);
+  app.use("/api/attendance", attendanceRouter);
+  app.use("/api/payroll", payrollRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ error: "Not found" });
