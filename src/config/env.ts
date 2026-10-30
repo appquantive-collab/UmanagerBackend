@@ -24,8 +24,11 @@ export const env = {
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean),
-  // Optional: AI dashboard personalization is disabled (fails gracefully) until this is set.
-  openaiApiKey: process.env.OPENAI_API_KEY || null,
+  // Optional: AI features (dashboard personalization, order parsing, the AI
+  // business assistant chat) fail gracefully until this is set. Groq hosts
+  // open models behind an OpenAI-compatible API, so the same `openai` SDK is
+  // reused with a different baseURL rather than adding a second SDK dependency.
+  groqApiKey: process.env.GROQ_API_KEY || null,
   // Optional: product image upload is disabled (fails gracefully) until this is set.
   // The cloudinary SDK reads CLOUDINARY_URL from the environment itself; this
   // flag just lets the app know whether that happened.

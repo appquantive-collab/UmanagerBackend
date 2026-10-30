@@ -1,5 +1,5 @@
-import OpenAI from "openai";
 import { env } from "../../config/env";
+import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
 import type { BusinessOnboarding } from "../../models/Tenant";
 
 // The only dashboard sections/actions the model is allowed to reorder or relabel.
@@ -26,7 +26,7 @@ export interface GeneratedDashboardLayout {
 
 export class AiNotConfiguredError extends Error {
   constructor() {
-    super("AI dashboard personalization is not configured (missing OPENAI_API_KEY)");
+    super("AI dashboard personalization is not configured (missing GROQ_API_KEY)");
     this.name = "AiNotConfiguredError";
   }
 }
@@ -116,13 +116,13 @@ export async function generateDashboardLayout(
   businessName: string,
   onboarding: BusinessOnboarding
 ): Promise<GeneratedDashboardLayout> {
-  if (!env.openaiApiKey) {
+  if (!env.groqApiKey) {
     throw new AiNotConfiguredError();
   }
 
-  const client = new OpenAI({ apiKey: env.openaiApiKey });
+  const client = getGroqClient();
   const response = await client.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: GROQ_CHAT_MODEL,
     response_format: { type: "json_object" },
     messages: [{ role: "user", content: buildPrompt(businessName, onboarding) }],
   });

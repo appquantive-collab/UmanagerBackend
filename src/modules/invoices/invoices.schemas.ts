@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const billLineItemSchema = z.object({
+  orderId: z.string().optional(),
   productId: z.string().optional(),
   productName: z.string().min(1),
   quantity: z.number().positive(),

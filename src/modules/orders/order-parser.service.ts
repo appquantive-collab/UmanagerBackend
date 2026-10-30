@@ -1,9 +1,9 @@
-import OpenAI from "openai";
 import { env } from "../../config/env";
+import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
 
 export class AiNotConfiguredError extends Error {
   constructor() {
-    super("AI order parsing is not configured (missing OPENAI_API_KEY)");
+    super("AI order parsing is not configured (missing GROQ_API_KEY)");
     this.name = "AiNotConfiguredError";
   }
 }
@@ -96,13 +96,13 @@ function parseAndValidate(raw: string, catalog: CatalogEntry[]): ParsedOrder {
 }
 
 export async function parseOrderText(text: string, catalog: CatalogEntry[]): Promise<ParsedOrder> {
-  if (!env.openaiApiKey) {
+  if (!env.groqApiKey) {
     throw new AiNotConfiguredError();
   }
 
-  const client = new OpenAI({ apiKey: env.openaiApiKey });
+  const client = getGroqClient();
   const response = await client.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: GROQ_CHAT_MODEL,
     response_format: { type: "json_object" },
     messages: [{ role: "user", content: buildPrompt(text, catalog) }],
   });

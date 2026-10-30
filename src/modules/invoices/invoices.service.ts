@@ -54,6 +54,7 @@ export async function getCustomerPendingItems(tenantId: string, customerId: stri
 }
 
 interface BillLineItemInput {
+  orderId?: string;
   productId?: string;
   productName: string;
   quantity: number;
@@ -90,7 +91,7 @@ export async function createBill(tenantId: string, userId: string, input: Create
     }
   }
 
-  const resolvedItems: { productId: Types.ObjectId; productName: string; quantity: number; unit: string; unitPrice: number }[] = [];
+  const resolvedItems: { orderId?: string; productId: Types.ObjectId; productName: string; quantity: number; unit: string; unitPrice: number }[] = [];
   for (const item of input.items) {
     let productId: Types.ObjectId;
 
@@ -115,6 +116,7 @@ export async function createBill(tenantId: string, userId: string, input: Create
     }
 
     resolvedItems.push({
+      orderId: item.orderId,
       productId,
       productName: item.productName,
       quantity: item.quantity,
@@ -169,10 +171,61 @@ export async function createBill(tenantId: string, userId: string, input: Create
   });
 
   if (input.orderIds.length > 0) {
-    await Order.updateMany({ _id: { $in: input.orderIds }, tenantId }, { $set: { status: "delivered" } });
+    await applyFulfillment(tenantId, input.orderIds, resolvedItems);
   }
 
   return invoice;
+}
+
+// Reduces each order's line items by exactly what was billed against them,
+// rather than marking the whole order delivered — a bill only edited down to
+// part of an order's quantity must leave the rest of that order pending so
+// it can still be billed later. Matches bill items to order items by
+// productId, since that's the one stable identity both sides share.
+async function applyFulfillment(
+  tenantId: string,
+  orderIds: string[],
+  billedItems: { orderId?: string; productId: Types.ObjectId; quantity: number }[]
+) {
+  const billedByOrderId = new Map<string, Map<string, number>>();
+  for (const item of billedItems) {
+    if (!item.orderId) continue;
+    const productKey = String(item.productId);
+    const perProduct = billedByOrderId.get(item.orderId) ?? new Map<string, number>();
+    perProduct.set(productKey, (perProduct.get(productKey) ?? 0) + item.quantity);
+    billedByOrderId.set(item.orderId, perProduct);
+  }
+
+  const orders = await Order.find({ _id: { $in: orderIds }, tenantId });
+  for (const order of orders) {
+    const billedForThisOrder = billedByOrderId.get(String(order._id));
+    if (!billedForThisOrder) continue;
+
+    const remainingItems = [];
+    for (const orderItem of order.items) {
+      const productKey = String(orderItem.productId);
+      const billedQty = billedForThisOrder.get(productKey) ?? 0;
+      const remainingQty = orderItem.quantity - billedQty;
+      if (remainingQty > 0.001) {
+        remainingItems.push({
+          productId: orderItem.productId,
+          productName: orderItem.productName,
+          quantity: remainingQty,
+          unit: orderItem.unit,
+          unitPrice: orderItem.unitPrice,
+          wasAutoCreated: orderItem.wasAutoCreated,
+        });
+      }
+    }
+
+    if (remainingItems.length === 0) {
+      order.status = "delivered";
+    } else {
+      order.items = remainingItems;
+      order.totalAmount = remainingItems.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
+    }
+    await order.save();
+  }
 }
 
 export async function recordPayment(
