@@ -1,6 +1,7 @@
 import { Schema, model, Types } from "mongoose";
 
 export type UserRole = "SUPER_ADMIN" | "OWNER" | "MANAGER" | "SALESMAN" | "WAREHOUSE_STAFF";
+export type PreferredLanguage = "en" | "hi" | "hi-Latn";
 
 export interface UserDocument {
   _id: Types.ObjectId;
@@ -11,6 +12,7 @@ export interface UserDocument {
   passwordHash: string;
   role: UserRole;
   isActive: boolean;
+  preferredLanguage: PreferredLanguage;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -28,6 +30,7 @@ const userSchema = new Schema<UserDocument>(
       required: true,
     },
     isActive: { type: Boolean, default: true },
+    preferredLanguage: { type: String, enum: ["en", "hi", "hi-Latn"], default: "en" },
   },
   { timestamps: true }
 );

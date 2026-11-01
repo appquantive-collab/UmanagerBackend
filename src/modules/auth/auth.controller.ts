@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { loginPhoneSchema, loginSchema, refreshSchema, registerSchema } from "./auth.schemas";
-import { getProfile, login, loginByPhone, registerTenantOwner } from "./auth.service";
+import { loginPhoneSchema, loginSchema, refreshSchema, registerSchema, updateProfileSchema } from "./auth.schemas";
+import { getProfile, login, loginByPhone, registerTenantOwner, updateProfile } from "./auth.service";
 import { requireAuth } from "../../middleware/auth";
 import { verifyRefreshToken } from "../../utils/tokens";
 import { signAccessToken } from "../../utils/tokens";
@@ -53,6 +53,20 @@ authRouter.get("/me", requireAuth, async (req, res) => {
   try {
     const profile = await getProfile(req.auth!.userId);
     return res.json(profile);
+  } catch (err) {
+    return res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+authRouter.patch("/me", requireAuth, async (req, res) => {
+  const parsed = updateProfileSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  try {
+    const result = await updateProfile(req.auth!.userId, parsed.data);
+    return res.json(result);
   } catch (err) {
     return res.status(404).json({ error: (err as Error).message });
   }

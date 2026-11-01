@@ -10,6 +10,7 @@ export const registerSchema = z.object({
     .string()
     .regex(/^\d{10}$/)
     .optional(),
+  preferredLanguage: z.enum(["en", "hi", "hi-Latn"]).optional(),
 });
 
 export const loginSchema = z.object({
@@ -24,4 +25,8 @@ export const loginPhoneSchema = z.object({
 
 export const refreshSchema = z.object({
   refreshToken: z.string().min(1),
+});
+
+export const updateProfileSchema = z.object({
+  preferredLanguage: z.enum(["en", "hi", "hi-Latn"]).optional(),
 });

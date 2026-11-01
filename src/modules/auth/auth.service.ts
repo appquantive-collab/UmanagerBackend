@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { Tenant } from "../../models/Tenant";
-import { User } from "../../models/User";
+import { User, type PreferredLanguage } from "../../models/User";
 import { signAccessToken, signRefreshToken } from "../../utils/tokens";
 
 interface RegisterInput {
@@ -10,6 +10,7 @@ interface RegisterInput {
   email: string;
   password: string;
   phone?: string;
+  preferredLanguage?: PreferredLanguage;
 }
 
 export async function registerTenantOwner(input: RegisterInput) {
@@ -37,6 +38,7 @@ export async function registerTenantOwner(input: RegisterInput) {
     name: input.ownerName,
     email: input.email.toLowerCase(),
     ...(input.phone ? { phone: input.phone } : {}),
+    ...(input.preferredLanguage ? { preferredLanguage: input.preferredLanguage } : {}),
     passwordHash,
     role: "OWNER",
   });
@@ -89,6 +91,7 @@ export async function getProfile(userId: string) {
     email: user.email,
     phone: user.phone,
     role: user.role,
+    preferredLanguage: user.preferredLanguage,
     tenant: tenant
       ? {
           tenantId: String(tenant._id),
@@ -104,7 +107,14 @@ export async function getProfile(userId: string) {
   };
 }
 
-function issueTokens(user: { _id: unknown; tenantId: unknown; role: string; name: string; email: string }) {
+function issueTokens(user: {
+  _id: unknown;
+  tenantId: unknown;
+  role: string;
+  name: string;
+  email: string;
+  preferredLanguage: PreferredLanguage;
+}) {
   const payload = {
     userId: String(user._id),
     tenantId: user.tenantId ? String(user.tenantId) : null,
@@ -114,6 +124,20 @@ function issueTokens(user: { _id: unknown; tenantId: unknown; role: string; name
   return {
     accessToken: signAccessToken(payload),
     refreshToken: signRefreshToken(payload),
-    user: { ...payload, name: user.name, email: user.email },
+    user: { ...payload, name: user.name, email: user.email, preferredLanguage: user.preferredLanguage },
   };
+}
+
+export async function updateProfile(userId: string, patch: { preferredLanguage?: PreferredLanguage }) {
+  const user = await User.findById(userId);
+  if (!user || !user.isActive) {
+    throw new Error("Account not found");
+  }
+
+  if (patch.preferredLanguage) {
+    user.preferredLanguage = patch.preferredLanguage;
+  }
+  await user.save();
+
+  return { preferredLanguage: user.preferredLanguage };
 }
