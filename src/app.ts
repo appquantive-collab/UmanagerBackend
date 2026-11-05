@@ -20,6 +20,8 @@ import { assemblyRouter } from "./modules/assembly/assembly.controller";
 import { attendanceRouter } from "./modules/attendance/attendance.controller";
 import { payrollRouter } from "./modules/payroll/payroll.controller";
 import { aiChatRouter } from "./modules/ai-chat/ai-chat.controller";
+import { ttsRouter } from "./modules/tts/tts.controller";
+import { munshiRouter } from "./modules/munshi/munshi.controller";
 
 export function createApp() {
   const app = express();
@@ -48,6 +50,8 @@ export function createApp() {
   app.use("/api/attendance", attendanceRouter);
   app.use("/api/payroll", payrollRouter);
   app.use("/api/ai-chat", aiChatRouter);
+  app.use("/api/tts", ttsRouter);
+  app.use("/api/munshi", munshiRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ error: "Not found" });
