@@ -148,6 +148,14 @@ export async function requestLoginOtp(phone: string) {
     { upsert: true }
   );
 
+  const timing = { resendAfterSeconds: RESEND_COOLDOWN_MS / 1000, expiresInSeconds: OTP_TTL_MS / 1000 };
+
+  // Temporary: until an SMS/WhatsApp provider is configured, hand the code back so
+  // the app can show it in a popup. Setting TEXTBELT_API_KEY switches this off.
+  if (!env.textbeltApiKey) {
+    return { ...timing, code };
+  }
+
   try {
     await sendSms(phone, `${code} is your SethSathi login code. It expires in 5 minutes. Do not share it with anyone.`);
   } catch (err) {
@@ -160,7 +168,7 @@ export async function requestLoginOtp(phone: string) {
     throw new OtpError("We couldn't send the code. Please try again.", "SMS_FAILED", 502);
   }
 
-  return { resendAfterSeconds: RESEND_COOLDOWN_MS / 1000, expiresInSeconds: OTP_TTL_MS / 1000 };
+  return timing;
 }
 
 export async function verifyLoginOtp(phone: string, code: string) {
