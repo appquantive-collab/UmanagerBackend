@@ -18,9 +18,13 @@ export const loginSchema = z.object({
   password: z.string().min(8),
 });
 
-export const loginPhoneSchema = z.object({
+export const otpRequestSchema = z.object({
   phone: z.string().regex(/^\d{10}$/, "Enter a valid 10-digit mobile number"),
-  password: z.string().min(8),
+});
+
+export const otpVerifySchema = z.object({
+  phone: z.string().regex(/^\d{10}$/, "Enter a valid 10-digit mobile number"),
+  code: z.string().regex(/^\d{6}$/, "Enter the 6-digit code"),
 });
 
 export const refreshSchema = z.object({

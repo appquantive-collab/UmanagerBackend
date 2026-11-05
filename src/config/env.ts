@@ -33,4 +33,7 @@ export const env = {
   // The cloudinary SDK reads CLOUDINARY_URL from the environment itself; this
   // flag just lets the app know whether that happened.
   cloudinaryConfigured: Boolean(process.env.CLOUDINARY_URL),
+  // Hosted Textbelt (textbelt.com) key for login OTP SMS. Without it, OTPs are
+  // printed to the server console in development and refused in production.
+  textbeltApiKey: process.env.TEXTBELT_API_KEY || null,
 };

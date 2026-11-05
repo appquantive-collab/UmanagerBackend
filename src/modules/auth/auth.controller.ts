@@ -1,6 +1,23 @@
 import { Router } from "express";
-import { loginPhoneSchema, loginSchema, refreshSchema, registerSchema, updateProfileSchema } from "./auth.schemas";
-import { getProfile, login, loginByPhone, registerTenantOwner, updateProfile } from "./auth.service";
+import type { Response } from "express";
+import {
+  loginSchema,
+  otpRequestSchema,
+  otpVerifySchema,
+  refreshSchema,
+  registerSchema,
+  updateProfileSchema,
+} from "./auth.schemas";
+import {
+  AccountExistsError,
+  OtpError,
+  getProfile,
+  login,
+  registerTenantOwner,
+  requestLoginOtp,
+  updateProfile,
+  verifyLoginOtp,
+} from "./auth.service";
 import { requireAuth } from "../../middleware/auth";
 import { verifyRefreshToken } from "../../utils/tokens";
 import { signAccessToken } from "../../utils/tokens";
@@ -17,7 +34,8 @@ authRouter.post("/register", async (req, res) => {
     const result = await registerTenantOwner(parsed.data);
     return res.status(201).json(result);
   } catch (err) {
-    return res.status(409).json({ error: (err as Error).message });
+    const code = err instanceof AccountExistsError ? err.code : undefined;
+    return res.status(409).json({ error: (err as Error).message, code });
   }
 });
 
@@ -35,17 +53,39 @@ authRouter.post("/login", async (req, res) => {
   }
 });
 
-authRouter.post("/login-phone", async (req, res) => {
-  const parsed = loginPhoneSchema.safeParse(req.body);
+function sendOtpError(res: Response, err: unknown) {
+  if (err instanceof OtpError) {
+    return res
+      .status(err.status)
+      .json({ error: err.message, code: err.code, retryAfterSeconds: err.retryAfterSeconds });
+  }
+  console.error("[otp] unexpected error:", err);
+  return res.status(500).json({ error: "Something went wrong. Please try again." });
+}
+
+authRouter.post("/otp/request", async (req, res) => {
+  const parsed = otpRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
   try {
-    const result = await loginByPhone(parsed.data.phone, parsed.data.password);
-    return res.json(result);
+    return res.json(await requestLoginOtp(parsed.data.phone));
   } catch (err) {
-    return res.status(401).json({ error: (err as Error).message });
+    return sendOtpError(res, err);
+  }
+});
+
+authRouter.post("/otp/verify", async (req, res) => {
+  const parsed = otpVerifySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  try {
+    return res.json(await verifyLoginOtp(parsed.data.phone, parsed.data.code));
+  } catch (err) {
+    return sendOtpError(res, err);
   }
 });
 

@@ -23,3 +23,5 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      - key: TEXTBELT_API_KEY
+        sync: false
