@@ -9,7 +9,10 @@ export interface UserDocument {
   name: string;
   email: string;
   phone: string | null;
-  passwordHash: string;
+  /** Absent for accounts created with Google or Apple. */
+  passwordHash?: string;
+  googleId?: string;
+  appleId?: string;
   role: UserRole;
   isActive: boolean;
   preferredLanguage: PreferredLanguage;
@@ -23,7 +26,9 @@ const userSchema = new Schema<UserDocument>(
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, lowercase: true, trim: true },
     phone: { type: String, trim: true },
-    passwordHash: { type: String, required: true },
+    passwordHash: { type: String },
+    googleId: { type: String },
+    appleId: { type: String },
     role: {
       type: String,
       enum: ["SUPER_ADMIN", "OWNER", "MANAGER", "SALESMAN", "WAREHOUSE_STAFF"],
@@ -37,5 +42,7 @@ const userSchema = new Schema<UserDocument>(
 
 userSchema.index({ tenantId: 1, email: 1 }, { unique: true });
 userSchema.index({ phone: 1 }, { unique: true, sparse: true });
+userSchema.index({ googleId: 1 }, { unique: true, sparse: true });
+userSchema.index({ appleId: 1 }, { unique: true, sparse: true });
 
 export const User = model<UserDocument>("User", userSchema);

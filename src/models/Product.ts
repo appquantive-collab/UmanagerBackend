@@ -11,6 +11,12 @@ export interface BomLine {
   unit: string;
 }
 
+/** A bigger pack the item is also bought/sold in, e.g. 1 box = 12 pcs. Stock is always kept in the base unit. */
+export interface AltUnit {
+  name: string;
+  factor: number;
+}
+
 export interface ProductDocument {
   _id: Types.ObjectId;
   tenantId: Types.ObjectId;
@@ -31,6 +37,15 @@ export interface ProductDocument {
   isActive: boolean;
   isRawMaterial: boolean;
   bom: BomLine[];
+  altUnit?: AltUnit;
+  /** Medicines, food, cosmetics: stock is kept per batch with an expiry date; oldest expiry sells first. */
+  trackBatch: boolean;
+  /** Mobiles, electronics: every piece has an IMEI/serial number recorded on purchase and sale. */
+  trackSerial: boolean;
+  /** Garments/footwear: items that are sizes/colours of one design share a group name. */
+  variantGroup?: string;
+  size?: string;
+  color?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -64,6 +79,20 @@ const productSchema = new Schema<ProductDocument>(
     isActive: { type: Boolean, default: true },
     isRawMaterial: { type: Boolean, default: false, index: true },
     bom: { type: [bomLineSchema], default: [] },
+    altUnit: {
+      type: new Schema<AltUnit>(
+        {
+          name: { type: String, required: true, trim: true },
+          factor: { type: Number, required: true, min: 0.001 },
+        },
+        { _id: false }
+      ),
+    },
+    trackBatch: { type: Boolean, default: false },
+    trackSerial: { type: Boolean, default: false },
+    variantGroup: { type: String, trim: true, index: true },
+    size: { type: String, trim: true },
+    color: { type: String, trim: true },
   },
   { timestamps: true }
 );

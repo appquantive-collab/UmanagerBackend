@@ -25,6 +25,11 @@ export interface StockMovementDocument {
   movementType: StockMovementType;
   note?: string;
   referenceId?: string;
+  /** Batch-tracked items: which batch moved, and when it expires. */
+  batchNo?: string;
+  expiryDate?: Date;
+  /** Serial-tracked items: the exact IMEI/serial numbers that moved. */
+  serials?: string[];
   createdBy: Types.ObjectId;
   createdAt: Date;
 }
@@ -54,11 +59,16 @@ const stockMovementSchema = new Schema<StockMovementDocument>(
     },
     note: { type: String, trim: true },
     referenceId: { type: String, trim: true },
+    batchNo: { type: String, trim: true },
+    expiryDate: { type: Date },
+    serials: { type: [String], default: undefined },
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );
 
 stockMovementSchema.index({ tenantId: 1, productId: 1, createdAt: -1 });
+stockMovementSchema.index({ tenantId: 1, serials: 1 }, { sparse: true });
+stockMovementSchema.index({ tenantId: 1, referenceId: 1 });
 
 export const StockMovement = model<StockMovementDocument>("StockMovement", stockMovementSchema);

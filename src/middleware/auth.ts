@@ -47,8 +47,20 @@ export function requireTenant(req: Request, res: Response, next: NextFunction) {
 export function requireRole(...roles: UserRole[]) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.auth || !roles.includes(req.auth.role)) {
-      return res.status(403).json({ error: "Insufficient permissions" });
+      return res.status(403).json({ error: "Insufficient permissions", code: "FORBIDDEN" });
     }
     return next();
   };
 }
+
+/** Owners and managers can do everything; this blocks only the listed staff roles. */
+export function denyRoles(...roles: UserRole[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (req.auth && roles.includes(req.auth.role)) {
+      return res.status(403).json({ error: "Insufficient permissions", code: "FORBIDDEN" });
+    }
+    return next();
+  };
+}
+
+export const ownerOrManager = requireRole("OWNER", "MANAGER", "SUPER_ADMIN");

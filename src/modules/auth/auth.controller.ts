@@ -1,11 +1,14 @@
 import { Router } from "express";
 import type { Response } from "express";
 import {
+  appleSignInSchema,
+  googleSignInSchema,
   loginSchema,
   otpRequestSchema,
   otpVerifySchema,
   refreshSchema,
   registerSchema,
+  socialCompleteSchema,
   updateProfileSchema,
 } from "./auth.schemas";
 import {
@@ -19,6 +22,9 @@ import {
   verifyLoginOtp,
 } from "./auth.service";
 import { requireAuth } from "../../middleware/auth";
+import { User } from "../../models/User";
+import { ipRateLimit } from "../../middleware/ipRateLimit";
+import { SocialAuthError, completeSocialSignup, socialSignIn } from "./social.service";
 import { verifyRefreshToken } from "../../utils/tokens";
 import { signAccessToken } from "../../utils/tokens";
 
@@ -112,17 +118,69 @@ authRouter.patch("/me", requireAuth, async (req, res) => {
   }
 });
 
-authRouter.post("/refresh", (req, res) => {
+// Re-reads the account so a role change or a turned-off login takes effect
+// within one access-token lifetime, without the person signing out.
+authRouter.post("/refresh", async (req, res) => {
   const parsed = refreshSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
+  let payload;
   try {
-    const payload = verifyRefreshToken(parsed.data.refreshToken);
-    const accessToken = signAccessToken(payload);
-    return res.json({ accessToken });
+    payload = verifyRefreshToken(parsed.data.refreshToken);
   } catch {
     return res.status(401).json({ error: "Invalid or expired refresh token" });
+  }
+  const user = await User.findById(payload.userId, { role: 1, isActive: 1, tenantId: 1 }).lean();
+  if (!user || !user.isActive) {
+    return res.status(401).json({ error: "Invalid or expired refresh token" });
+  }
+  const accessToken = signAccessToken({
+    userId: payload.userId,
+    tenantId: user.tenantId ? String(user.tenantId) : null,
+    role: user.role,
+  });
+  return res.json({ accessToken });
+});
+
+// ---------- Continue with Google / Apple ----------
+
+const socialLimit = ipRateLimit({ perIp: 20, total: 400, message: "Too many sign-in attempts. Please wait a minute." });
+
+function sendSocialError(res: Response, err: unknown) {
+  if (err instanceof SocialAuthError) return res.status(err.status).json({ error: err.message, code: err.code });
+  if (err instanceof AccountExistsError) return res.status(409).json({ error: err.message, code: err.code });
+  console.error("[auth:social] unexpected error:", err);
+  return res.status(500).json({ error: "Something went wrong. Please try again." });
+}
+
+authRouter.post("/google", socialLimit, async (req, res) => {
+  const parsed = googleSignInSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    return res.json(await socialSignIn("google", parsed.data.credential));
+  } catch (err) {
+    return sendSocialError(res, err);
+  }
+});
+
+authRouter.post("/apple", socialLimit, async (req, res) => {
+  const parsed = appleSignInSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    return res.json(await socialSignIn("apple", parsed.data.idToken, parsed.data.name));
+  } catch (err) {
+    return sendSocialError(res, err);
+  }
+});
+
+authRouter.post("/social/complete", socialLimit, async (req, res) => {
+  const parsed = socialCompleteSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    return res.status(201).json(await completeSocialSignup(parsed.data));
+  } catch (err) {
+    return sendSocialError(res, err);
   }
 });

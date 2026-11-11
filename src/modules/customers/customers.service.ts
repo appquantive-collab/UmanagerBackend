@@ -1,6 +1,6 @@
 import { Types } from "mongoose";
 import { Customer } from "../../models/Customer";
-import { Invoice } from "../../models/Invoice";
+import { ACTIVE_INVOICE, Invoice } from "../../models/Invoice";
 import { Order } from "../../models/Order";
 
 export interface CustomerListItem {
@@ -9,6 +9,10 @@ export interface CustomerListItem {
   phone?: string;
   creditLimit: number;
   isActive: boolean;
+  gstin?: string;
+  address?: string;
+  stateCode?: string;
+  isWalkIn?: boolean;
   totalPurchases: number;
   outstanding: number;
   lastPurchaseAt: string | null;
@@ -26,7 +30,7 @@ export async function listCustomersWithStats(tenantId: string, search?: string):
   if (customers.length === 0) return [];
 
   const stats = await Invoice.aggregate([
-    { $match: { tenantId: new Types.ObjectId(tenantId), customerId: { $in: customers.map((c) => c._id) } } },
+    { $match: { tenantId: new Types.ObjectId(tenantId), ...ACTIVE_INVOICE, customerId: { $in: customers.map((c) => c._id) } } },
     {
       $group: {
         _id: "$customerId",
@@ -47,6 +51,10 @@ export async function listCustomersWithStats(tenantId: string, search?: string):
       phone: c.phone,
       creditLimit: c.creditLimit,
       isActive: c.isActive,
+      gstin: c.gstin,
+      address: c.address,
+      stateCode: c.stateCode,
+      isWalkIn: c.isWalkIn,
       totalPurchases: s?.totalPurchases ?? 0,
       outstanding: Math.max(0, s?.outstanding ?? 0),
       lastPurchaseAt: s?.lastPurchaseAt ? new Date(s.lastPurchaseAt).toISOString() : null,
@@ -62,6 +70,10 @@ export interface CustomerPortfolio {
     phone?: string;
     creditLimit: number;
     isActive: boolean;
+    gstin?: string;
+    address?: string;
+    stateCode?: string;
+    isWalkIn?: boolean;
     createdAt: string;
   };
   stats: {
@@ -110,7 +122,7 @@ export async function getCustomerPortfolio(tenantId: string, customerId: string)
 
   const [orders, invoices] = await Promise.all([
     Order.find({ tenantId, customerId }).sort({ createdAt: -1 }).lean(),
-    Invoice.find({ tenantId, customerId }).sort({ createdAt: -1 }).lean(),
+    Invoice.find({ tenantId, customerId, ...ACTIVE_INVOICE }).sort({ createdAt: -1 }).lean(),
   ]);
 
   const totalPurchases = invoices.reduce((sum, inv) => sum + inv.totalAmount, 0);
@@ -137,6 +149,10 @@ export async function getCustomerPortfolio(tenantId: string, customerId: string)
       phone: customer.phone,
       creditLimit: customer.creditLimit,
       isActive: customer.isActive,
+      gstin: customer.gstin,
+      address: customer.address,
+      stateCode: customer.stateCode,
+      isWalkIn: customer.isWalkIn,
       createdAt: customer.createdAt.toISOString(),
     },
     stats: {

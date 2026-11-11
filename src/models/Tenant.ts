@@ -91,6 +91,14 @@ export interface TenantDocument {
   businessType: string;
   ownerEmail: string;
   phone?: string;
+  gstin?: string;
+  address?: string;
+  stateCode?: string;
+  upiId?: string;
+  bankName?: string;
+  bankAccount?: string;
+  bankIfsc?: string;
+  invoiceTerms?: string;
   country?: string;
   currency: string;
   timezone: string;
@@ -192,6 +200,14 @@ const tenantSchema = new Schema<TenantDocument>(
     businessName: { type: String, required: true, trim: true },
     businessType: { type: String, required: true, trim: true },
     ownerEmail: { type: String, required: true, lowercase: true, trim: true },
+    gstin: { type: String, trim: true, uppercase: true },
+    address: { type: String, trim: true },
+    stateCode: { type: String, trim: true },
+    upiId: { type: String, trim: true },
+    bankName: { type: String, trim: true },
+    bankAccount: { type: String, trim: true },
+    bankIfsc: { type: String, trim: true, uppercase: true },
+    invoiceTerms: { type: String, trim: true },
     phone: { type: String, trim: true },
     country: { type: String, trim: true },
     currency: { type: String, default: "INR" },

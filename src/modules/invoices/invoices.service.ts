@@ -1,16 +1,70 @@
-import { Types } from "mongoose";
+import mongoose, { Types } from "mongoose";
 import { Order } from "../../models/Order";
-import { Product } from "../../models/Product";
+import { Product, type ProductDocument } from "../../models/Product";
 import { Customer } from "../../models/Customer";
-import { Invoice, type BillType, type InvoiceLineItem, type PaymentMethod } from "../../models/Invoice";
+import { Tenant } from "../../models/Tenant";
+import { StockMovement } from "../../models/StockMovement";
+import {
+  ACTIVE_INVOICE,
+  Invoice,
+  type BillType,
+  type InvoiceLineItem,
+  type PaymentMethod,
+} from "../../models/Invoice";
 import { generateSku } from "../../utils/sku";
+import {
+  defaultWarehouseId,
+  planTake,
+  round3,
+  serialsInStock,
+  stockBuckets,
+  toBaseQty,
+  totalOf,
+  type StockBucket,
+} from "../stock/ledger";
+
+/** A bill that can't be made as asked; `code` lets the app explain and offer an override. */
+export class BillError extends Error {
+  constructor(
+    message: string,
+    readonly status = 400,
+    readonly code?:
+      | "INSUFFICIENT_STOCK"
+      | "CREDIT_LIMIT"
+      | "HAS_PAYMENTS"
+      | "ALREADY_CANCELLED"
+      | "CANCELLED"
+      | "SERIAL_REQUIRED"
+      | "SERIAL_NOT_IN_STOCK"
+      | "RETURN_TOO_MUCH",
+    readonly details?: unknown
+  ) {
+    super(message);
+    this.name = "BillError";
+  }
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 async function nextInvoiceNumber(tenantId: string): Promise<string> {
-  // Per-tenant sequential numbering: INV-0001, INV-0002, ... — count existing
-  // invoices for this tenant rather than a global counter, since each tenant's
-  // invoice sequence is independent (never shared or comparable across tenants).
+  // Per-tenant sequential numbering: INV-0001, INV-0002, ... Cancelled bills keep
+  // their number, so the sequence never has gaps (as GST rules expect).
   const count = await Invoice.countDocuments({ tenantId });
   return `INV-${String(count + 1).padStart(4, "0")}`;
+}
+
+/** The shared "Walk-in customer" for quick counter sales (created on first use). */
+export async function getWalkInCustomer(tenantId: string) {
+  const existing = await Customer.findOne({ tenantId, isWalkIn: true });
+  if (existing) return existing;
+  return Customer.create({ tenantId, name: "Walk-in customer", isWalkIn: true, creditLimit: 0 });
+}
+
+/** GSTIN starts with the 2-digit state code; fall back to an explicitly saved state. */
+function stateOf(party: { gstin?: string | null; stateCode?: string | null } | null | undefined): string | undefined {
+  const fromGstin = party?.gstin?.trim().slice(0, 2);
+  if (fromGstin && /^\d{2}$/.test(fromGstin)) return fromGstin;
+  return party?.stateCode?.trim() || undefined;
 }
 
 export interface PendingItem {
@@ -60,48 +114,193 @@ interface BillLineItemInput {
   quantity: number;
   unit: string;
   unitPrice: number;
+  discountPercent?: number;
+  /** IMEI / serial numbers sold, for serial-tracked items. */
+  serials?: string[];
 }
 
 interface CreateBillInput {
-  customerId: string;
+  /** Omit for a walk-in counter sale. */
+  customerId?: string;
   orderIds: string[];
   items: BillLineItemInput[];
   billType: BillType;
   dueDate?: string;
+  /** Round the total to the nearest rupee (default on). */
+  roundOff?: boolean;
+  /** The shop confirmed billing items it doesn't have enough stock of. */
+  allowShortStock?: boolean;
+  /** The shop confirmed going over the customer's credit limit. */
+  allowOverCreditLimit?: boolean;
+  /** Money received with the bill (saves a separate payment step). */
+  payment?: { amount: number; method: PaymentMethod };
 }
 
-// The user has already reviewed and can freely edit items by this point — this
-// is where a typed-in new product actually gets created, same as order-saving.
+const cleanSerials = (serials?: string[]) => [...new Set((serials ?? []).map((s) => s.trim().toUpperCase()).filter(Boolean))];
+
+/** How much a customer owes on bills that count. */
+async function customerOutstanding(tenantId: string, customerId: Types.ObjectId): Promise<number> {
+  const rows = await Invoice.aggregate([
+    {
+      $match: {
+        tenantId: new mongoose.Types.ObjectId(tenantId),
+        customerId,
+        ...ACTIVE_INVOICE,
+        paymentStatus: { $in: ["unpaid", "partial"] },
+      },
+    },
+    { $group: { _id: null, due: { $sum: { $subtract: ["$totalAmount", "$amountPaid"] } } } },
+  ]);
+  return Math.max(0, rows[0]?.due ?? 0);
+}
+
+// Order of work: validate everything (orders, stock, credit) BEFORE saving
+// anything, so a stopped bill leaves no stray products, numbers or stock entries.
 export async function createBill(tenantId: string, userId: string, input: CreateBillInput) {
-  const customer = await Customer.findOne({ _id: input.customerId, tenantId });
+  const customer = input.customerId
+    ? await Customer.findOne({ _id: input.customerId, tenantId })
+    : await getWalkInCustomer(tenantId);
   if (!customer) {
-    throw new Error("Customer not found");
+    throw new BillError("Customer not found", 404);
   }
 
   if (input.orderIds.length > 0) {
     const orders = await Order.find({ _id: { $in: input.orderIds }, tenantId });
     if (orders.length !== input.orderIds.length) {
-      throw new Error("One or more orders were not found");
+      throw new BillError("One or more orders were not found", 404);
     }
     if (orders.some((o) => o.status === "cancelled")) {
-      throw new Error("Cannot bill a cancelled order");
+      throw new BillError("Cannot bill a cancelled order");
     }
     if (orders.some((o) => o.status === "delivered")) {
-      throw new Error("One or more of these orders has already been billed");
+      throw new BillError("One or more of these orders has already been billed");
     }
   }
 
-  const resolvedItems: { orderId?: string; productId: Types.ObjectId; productName: string; quantity: number; unit: string; unitPrice: number }[] = [];
-  for (const item of input.items) {
-    let productId: Types.ObjectId;
+  const tenant = await Tenant.findById(tenantId);
+  const sellerState = stateOf(tenant);
+  const buyerState = stateOf(customer);
+  // Different seller and buyer states → IGST; same state (or unknown) → CGST + SGST.
+  const isInterState = input.billType === "gst" && Boolean(sellerState && buyerState && sellerState !== buyerState);
 
+  // Existing products, looked up in one go.
+  const existingIds = input.items.filter((i) => i.productId).map((i) => i.productId!);
+  const products = await Product.find({ _id: { $in: existingIds }, tenantId });
+  const productById = new Map(products.map((p) => [String(p._id), p]));
+  const missing = existingIds.filter((id) => !productById.has(id));
+  if (missing.length > 0) {
+    throw new BillError("Some products were not found. Please refresh and try again.", 404);
+  }
+
+  // ---- IMEI / serial numbers: every serial-tracked piece sold must be one we have ----
+  const serialPlaces = new Map<string, Map<string, string>>(); // productId → serial → warehouseId
+  for (const item of input.items) {
+    const product = item.productId ? productById.get(item.productId) : undefined;
+    if (!product?.trackSerial) continue;
+    const serials = cleanSerials(item.serials);
+    const pieces = toBaseQty(product, item.quantity, item.unit);
+    if (serials.length !== pieces) {
+      throw new BillError(`Enter ${pieces} IMEI/serial number(s) for ${product.name}`, 400, "SERIAL_REQUIRED", {
+        productName: product.name,
+        needed: pieces,
+        given: serials.length,
+      });
+    }
+    const inStock = serialPlaces.get(item.productId!) ?? (await serialsInStock(tenantId, product._id));
+    serialPlaces.set(item.productId!, inStock);
+    const unknown = serials.filter((s) => !inStock.has(s));
+    if (unknown.length > 0) {
+      throw new BillError(`Not in stock: ${unknown.join(", ")}`, 400, "SERIAL_NOT_IN_STOCK", { productName: product.name, serials: unknown });
+    }
+  }
+
+  // ---- Stock check in the base unit (typed-in new items have no stock yet) ----
+  const requested = new Map<string, number>();
+  for (const item of input.items) {
+    const product = item.productId ? productById.get(item.productId) : undefined;
+    if (product) requested.set(item.productId!, round3((requested.get(item.productId!) ?? 0) + toBaseQty(product, item.quantity, item.unit)));
+  }
+  const stock = await stockBuckets(tenantId, products.map((p) => p._id));
+  const shortages = [...requested.entries()]
+    .filter(([productId, qty]) => totalOf(stock.get(productId)) + 1e-9 < qty)
+    .map(([productId, qty]) => ({
+      productId,
+      productName: productById.get(productId)!.name,
+      unit: productById.get(productId)!.unit,
+      requested: qty,
+      available: Math.max(0, totalOf(stock.get(productId))),
+    }));
+  if (shortages.length > 0 && !input.allowShortStock) {
+    throw new BillError("Not enough stock for some items", 409, "INSUFFICIENT_STOCK", { shortages });
+  }
+
+  // ---- Amounts: discount → GST (CGST+SGST or IGST) → round-off ----
+  const lines = input.items.map((item) => {
+    const product = item.productId ? productById.get(item.productId) : undefined;
+    const gstPercent = input.billType === "gst" ? (product?.gstPercent ?? 0) : 0;
+    const discountPercent = Math.min(100, Math.max(0, item.discountPercent ?? 0));
+    const gross = item.quantity * item.unitPrice;
+    const lineSubtotal = round2(gross * (1 - discountPercent / 100));
+    const lineTax = round2((lineSubtotal * gstPercent) / 100);
+    const half = round2(lineTax / 2);
+    return {
+      input: item,
+      gross,
+      line: {
+        productName: item.productName,
+        quantity: item.quantity,
+        unit: item.unit,
+        unitPrice: item.unitPrice,
+        gstPercent,
+        hsn: product?.hsn,
+        discountPercent,
+        lineSubtotal,
+        lineTax,
+        cgst: isInterState ? 0 : half,
+        sgst: isInterState ? 0 : round2(lineTax - half),
+        igst: isInterState ? lineTax : 0,
+        lineTotal: round2(lineSubtotal + lineTax),
+        orderId: item.orderId ? new mongoose.Types.ObjectId(item.orderId) : undefined,
+        serials: product?.trackSerial ? cleanSerials(item.serials) : undefined,
+      },
+    };
+  });
+
+  const subtotal = round2(lines.reduce((s, l) => s + l.line.lineSubtotal, 0));
+  const discountTotal = round2(lines.reduce((s, l) => s + (l.gross - l.line.lineSubtotal), 0));
+  const taxTotal = round2(lines.reduce((s, l) => s + l.line.lineTax, 0));
+  const beforeRounding = round2(subtotal + taxTotal);
+  const totalAmount = input.roundOff === false ? beforeRounding : Math.round(beforeRounding);
+  const roundOff = round2(totalAmount - beforeRounding);
+
+  // ---- Credit limit (not for walk-in) ----
+  // Counter (walk-in) sales are paid on the spot: with no payment given, the
+  // whole amount is taken as received in cash, so "Walk-in" never shows as owing.
+  const paidNow = round2(
+    Math.min(totalAmount, input.payment?.amount ?? (customer.isWalkIn ? totalAmount : 0))
+  );
+  const paidMethod: PaymentMethod = input.payment?.method ?? "cash";
+
+  if (!customer.isWalkIn && customer.creditLimit > 0 && !input.allowOverCreditLimit) {
+    const outstanding = await customerOutstanding(tenantId, customer._id);
+    if (outstanding + totalAmount - paidNow > customer.creditLimit + 0.01) {
+      throw new BillError("This bill takes the customer over their credit limit", 409, "CREDIT_LIMIT", {
+        creditLimit: customer.creditLimit,
+        outstanding: round2(outstanding),
+        billTotal: totalAmount,
+        afterBill: round2(outstanding + totalAmount - paidNow),
+      });
+    }
+  }
+
+  // ---- All checks passed: now save ----
+  const items: InvoiceLineItem[] = [];
+  for (const { input: item, line } of lines) {
+    let productId: Types.ObjectId;
     if (item.productId) {
-      const existing = await Product.findOne({ _id: item.productId, tenantId });
-      if (!existing) {
-        throw new Error(`Product ${item.productId} not found`);
-      }
-      productId = existing._id;
+      productId = productById.get(item.productId)!._id;
     } else {
+      // A typed-in item the shop hasn't added to inventory yet.
       const created = await Product.create({
         tenantId,
         name: item.productName,
@@ -114,67 +313,123 @@ export async function createBill(tenantId: string, userId: string, input: Create
       });
       productId = created._id;
     }
-
-    resolvedItems.push({
-      orderId: item.orderId,
-      productId,
-      productName: item.productName,
-      quantity: item.quantity,
-      unit: item.unit,
-      unitPrice: item.unitPrice,
-    });
+    items.push({ ...line, productId });
   }
-
-  const gstByProductId = new Map<string, number>();
-  if (input.billType === "gst") {
-    const products = await Product.find({ _id: { $in: resolvedItems.map((i) => i.productId) }, tenantId });
-    for (const p of products) gstByProductId.set(String(p._id), p.gstPercent ?? 0);
-  }
-
-  const items: InvoiceLineItem[] = resolvedItems.map((item) => {
-    const gstPercent = input.billType === "gst" ? (gstByProductId.get(String(item.productId)) ?? 0) : 0;
-    const lineSubtotal = item.quantity * item.unitPrice;
-    const lineTax = (lineSubtotal * gstPercent) / 100;
-    return {
-      productId: item.productId,
-      productName: item.productName,
-      quantity: item.quantity,
-      unit: item.unit,
-      unitPrice: item.unitPrice,
-      gstPercent,
-      lineSubtotal,
-      lineTax,
-      lineTotal: lineSubtotal + lineTax,
-    };
-  });
-
-  const subtotal = items.reduce((sum, i) => sum + i.lineSubtotal, 0);
-  const taxTotal = items.reduce((sum, i) => sum + i.lineTax, 0);
-  const totalAmount = subtotal + taxTotal;
-
-  const invoiceNumber = await nextInvoiceNumber(tenantId);
 
   const invoice = await Invoice.create({
     tenantId,
     orderIds: input.orderIds,
     customerId: customer._id,
-    invoiceNumber,
+    invoiceNumber: await nextInvoiceNumber(tenantId),
     billType: input.billType,
+    status: "active",
     items,
     subtotal,
+    discountTotal,
     taxTotal,
+    cgstTotal: round2(items.reduce((s, i) => s + (i.cgst ?? 0), 0)),
+    sgstTotal: round2(items.reduce((s, i) => s + (i.sgst ?? 0), 0)),
+    igstTotal: round2(items.reduce((s, i) => s + (i.igst ?? 0), 0)),
+    roundOff,
     totalAmount,
-    amountPaid: 0,
-    paymentStatus: "unpaid",
+    amountPaid: paidNow,
+    paymentStatus: totalAmount <= 0 || paidNow >= totalAmount - 0.01 ? "paid" : paidNow > 0 ? "partial" : "unpaid",
+    payments: paidNow > 0 ? [{ amount: paidNow, method: paidMethod, paidAt: new Date() }] : [],
+    isInterState,
+    seller: tenant
+      ? {
+          name: tenant.businessName,
+          phone: tenant.phone,
+          gstin: tenant.gstin,
+          address: tenant.address,
+          stateCode: sellerState,
+          upiId: tenant.upiId,
+          bankName: tenant.bankName,
+          bankAccount: tenant.bankAccount,
+          bankIfsc: tenant.bankIfsc,
+          terms: tenant.invoiceTerms,
+        }
+      : undefined,
+    buyer: {
+      name: customer.name,
+      phone: customer.phone,
+      gstin: customer.gstin,
+      address: customer.address,
+      stateCode: buyerState,
+    },
     dueDate: input.dueDate ? new Date(input.dueDate) : undefined,
     createdBy: userId,
   });
 
+  await deductStock(tenantId, userId, invoice.invoiceNumber, String(invoice._id), items, productById, stock, serialPlaces);
+
   if (input.orderIds.length > 0) {
-    await applyFulfillment(tenantId, input.orderIds, resolvedItems);
+    await applyFulfillment(
+      tenantId,
+      input.orderIds,
+      items.map((i) => {
+        const product = productById.get(String(i.productId));
+        return {
+          orderId: i.orderId ? String(i.orderId) : undefined,
+          productId: i.productId,
+          quantity: product ? toBaseQty(product, i.quantity, i.unit) : i.quantity,
+        };
+      })
+    );
   }
 
   return invoice;
+}
+
+// Sold goods leave stock (in the base unit): main warehouse first, oldest
+// expiry first for batch items, exact warehouses for serial items. Anything not
+// covered (the shop chose "Bill anyway") comes out of the main warehouse and
+// shows as minus stock to fix later.
+async function deductStock(
+  tenantId: string,
+  userId: string,
+  invoiceNumber: string,
+  invoiceId: string,
+  items: InvoiceLineItem[],
+  productById: Map<string, ProductDocument>,
+  stock: Map<string, StockBucket[]>,
+  serialPlaces: Map<string, Map<string, string>>
+) {
+  const mainId = String(await defaultWarehouseId(tenantId));
+  const movements: Record<string, unknown>[] = [];
+  const base = { tenantId, movementType: "sale", referenceId: invoiceId, note: invoiceNumber, createdBy: userId };
+  for (const item of items) {
+    const productKey = String(item.productId);
+    const product = productById.get(productKey);
+    const qty = product ? toBaseQty(product, item.quantity, item.unit) : item.quantity;
+
+    if (product?.trackSerial && item.serials?.length) {
+      const places = serialPlaces.get(productKey) ?? new Map<string, string>();
+      const byWarehouse = new Map<string, string[]>();
+      for (const serial of item.serials) {
+        const warehouseId = places.get(serial) || mainId;
+        byWarehouse.set(warehouseId, [...(byWarehouse.get(warehouseId) ?? []), serial]);
+      }
+      for (const [warehouseId, serials] of byWarehouse) {
+        movements.push({ ...base, productId: item.productId, warehouseId, quantity: -serials.length, serials });
+      }
+      continue;
+    }
+
+    const buckets = stock.get(productKey) ?? [];
+    stock.set(productKey, buckets);
+    for (const take of planTake(buckets, qty, mainId)) {
+      movements.push({
+        ...base,
+        productId: item.productId,
+        warehouseId: take.warehouseId,
+        quantity: -round3(take.qty),
+        batchNo: take.batchNo,
+        expiryDate: take.expiryDate,
+      });
+    }
+  }
+  if (movements.length > 0) await StockMovement.insertMany(movements);
 }
 
 // Reduces each order's line items by exactly what was billed against them,
@@ -228,6 +483,84 @@ async function applyFulfillment(
   }
 }
 
+/**
+ * Cancel a bill made by mistake: stock goes back, its orders reopen, and it no
+ * longer counts in sales or dues. Bills with payments must have them sorted first.
+ */
+export async function cancelBill(tenantId: string, userId: string, invoiceId: string, reason?: string) {
+  const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
+  if (!invoice) throw new BillError("Bill not found", 404);
+  if (invoice.status === "cancelled") throw new BillError("This bill is already cancelled", 400, "ALREADY_CANCELLED");
+  if (invoice.amountPaid > 0) {
+    // A paid counter sale made by mistake can be cancelled (the cash is handed
+    // back and drops out of the day's takings). Customer accounts with money
+    // received, or anything with a return on it, need a return instead.
+    const walkIn = await Customer.exists({ _id: invoice.customerId, tenantId, isWalkIn: true });
+    const hasReturn = invoice.payments.some((p) => p.method === "credit_note");
+    if (!walkIn || hasReturn) {
+      throw new BillError("This bill has payments recorded, so it can't be cancelled. Make a return instead.", 400, "HAS_PAYMENTS");
+    }
+  }
+
+  // Put back exactly what this bill took out, warehouse by warehouse.
+  const taken = await StockMovement.find({ tenantId, referenceId: String(invoice._id), movementType: "sale" });
+  if (taken.length > 0) {
+    await StockMovement.insertMany(
+      taken.map((m) => ({
+        tenantId,
+        productId: m.productId,
+        warehouseId: m.warehouseId,
+        quantity: -m.quantity,
+        movementType: "adjustment",
+        referenceId: String(invoice._id),
+        batchNo: m.batchNo,
+        expiryDate: m.expiryDate,
+        serials: m.serials?.length ? m.serials : undefined,
+        note: `Cancelled ${invoice.invoiceNumber}`,
+        createdBy: userId,
+      }))
+    );
+  }
+
+  // Reopen the orders this bill came from, with the billed quantities restored.
+  const byOrder = new Map<string, InvoiceLineItem[]>();
+  for (const item of invoice.items) {
+    if (!item.orderId) continue;
+    const key = String(item.orderId);
+    byOrder.set(key, [...(byOrder.get(key) ?? []), item]);
+  }
+  for (const [orderId, lines] of byOrder) {
+    const order = await Order.findOne({ _id: orderId, tenantId });
+    if (!order || order.status === "cancelled") continue;
+    for (const line of lines) {
+      const existing = order.items.find((i) => String(i.productId) === String(line.productId));
+      if (existing && order.status !== "delivered") existing.quantity += line.quantity;
+      else if (!existing || order.status === "delivered") {
+        if (order.status === "delivered") {
+          order.items = order.items.filter((i) => String(i.productId) !== String(line.productId));
+        }
+        order.items.push({
+          productId: line.productId,
+          productName: line.productName,
+          quantity: line.quantity,
+          unit: line.unit,
+          unitPrice: line.unitPrice,
+          wasAutoCreated: false,
+        });
+      }
+    }
+    order.status = "confirmed";
+    order.totalAmount = order.items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
+    await order.save();
+  }
+
+  invoice.status = "cancelled";
+  invoice.cancelledAt = new Date();
+  invoice.cancelReason = reason?.trim() || undefined;
+  await invoice.save();
+  return invoice;
+}
+
 export async function recordPayment(
   tenantId: string,
   invoiceId: string,
@@ -237,15 +570,18 @@ export async function recordPayment(
 ) {
   const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
   if (!invoice) {
-    throw new Error("Invoice not found");
+    throw new BillError("Invoice not found", 404);
+  }
+  if (invoice.status === "cancelled") {
+    throw new BillError("This bill is cancelled", 400, "CANCELLED");
   }
   if (invoice.paymentStatus === "paid") {
-    throw new Error("Invoice is already fully paid");
+    throw new BillError("Invoice is already fully paid");
   }
 
   const remaining = invoice.totalAmount - invoice.amountPaid;
   if (amount > remaining + 0.01) {
-    throw new Error(`Payment exceeds the remaining balance of ${remaining.toFixed(2)}`);
+    throw new BillError(`Payment exceeds the remaining balance of ${remaining.toFixed(2)}`);
   }
 
   invoice.payments.push({ amount, method, paidAt: new Date(), note });

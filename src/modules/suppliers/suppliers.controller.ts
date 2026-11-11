@@ -2,6 +2,7 @@ import { Router } from "express";
 import { Supplier } from "../../models/Supplier";
 import { requireAuth, requireTenant } from "../../middleware/auth";
 import { createSupplierSchema, updateSupplierSchema } from "./suppliers.schemas";
+import { supplierPurchaseStats } from "../purchases/purchases.service";
 
 export const suppliersRouter = Router();
 
@@ -15,8 +16,17 @@ suppliersRouter.get("/", async (req, res) => {
   const filter: Record<string, unknown> = { tenantId: req.auth!.tenantId };
   if (q) filter.name = { $regex: q, $options: "i" };
 
-  const suppliers = await Supplier.find(filter).sort({ createdAt: -1 });
-  res.json(suppliers);
+  const [suppliers, stats] = await Promise.all([
+    Supplier.find(filter).sort({ createdAt: -1 }).lean(),
+    supplierPurchaseStats(req.auth!.tenantId!),
+  ]);
+  // Each supplier with what you bought from them and still owe them.
+  res.json(
+    suppliers.map((s) => ({
+      ...s,
+      ...(stats.get(String(s._id)) ?? { totalPurchased: 0, outstanding: 0, purchaseCount: 0, lastPurchaseAt: null }),
+    }))
+  );
 });
 
 suppliersRouter.get("/:id", async (req, res) => {

@@ -55,5 +55,39 @@ export const onboardingSchema = z.object({
   goals: z
     .array(z.enum(["inventory_tracking", "credit_payments", "multi_warehouse", "staff_management", "ai_insights", "reporting"]))
     .min(1)
-    .max(3),
+    .max(6),
+});
+
+const optionalText = (max: number) => z.string().trim().max(max).optional();
+
+/** Business details printed on bills (Settings → Business / Tax / Invoice). */
+export const businessProfileSchema = z.object({
+  businessName: z.string().trim().min(1).max(120).optional(),
+  phone: optionalText(20),
+  gstin: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .refine((v) => v === "" || /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(v), "GSTIN should look like 27ABCDE1234F1Z5")
+    .optional(),
+  address: optionalText(400),
+  stateCode: z
+    .string()
+    .trim()
+    .refine((v) => v === "" || /^\d{2}$/.test(v), "Pick a state")
+    .optional(),
+  upiId: z
+    .string()
+    .trim()
+    .refine((v) => v === "" || /^[\w.\-]{2,}@[a-zA-Z]{2,}$/.test(v), "UPI ID should look like name@bank")
+    .optional(),
+  bankName: optionalText(80),
+  bankAccount: optionalText(30),
+  bankIfsc: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .refine((v) => v === "" || /^[A-Z]{4}0[A-Z0-9]{6}$/.test(v), "IFSC should look like SBIN0001234")
+    .optional(),
+  invoiceTerms: optionalText(600),
 });

@@ -1,8 +1,11 @@
 import { Router } from "express";
 import QRCode from "qrcode";
 import { Product } from "../../models/Product";
-import { requireAuth, requireTenant } from "../../middleware/auth";
-import { createProductSchema, updateProductSchema } from "./products.schemas";
+import { denyRoles, ownerOrManager, requireAuth, requireTenant } from "../../middleware/auth";
+import { createProductSchema, createVariantsSchema, importProductsSchema, importRowSchema, updateProductSchema } from "./products.schemas";
+import { StockMovement } from "../../models/StockMovement";
+import { defaultWarehouseId } from "../stock/ledger";
+import { recordAudit } from "../audit/audit.service";
 import { generateSku } from "../../utils/sku";
 import { validateBom } from "../assembly/assembly.service";
 
@@ -60,7 +63,7 @@ productsRouter.post("/", async (req, res) => {
   }
 });
 
-productsRouter.patch("/:id", async (req, res) => {
+productsRouter.patch("/:id", denyRoles("SALESMAN"), async (req, res) => {
   const parsed = updateProductSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
@@ -68,20 +71,130 @@ productsRouter.patch("/:id", async (req, res) => {
     if (parsed.data.bom && parsed.data.bom.length > 0) {
       await validateBom(req.auth!.tenantId!, parsed.data.bom);
     }
-    const product = await Product.findOneAndUpdate(
-      { _id: req.params.id, tenantId: req.auth!.tenantId },
-      parsed.data,
-      { new: true }
-    );
+    const { altUnit, ...rest } = parsed.data;
+    const update: Record<string, unknown> = { $set: rest };
+    if (altUnit === null) update.$unset = { altUnit: "" };
+    else if (altUnit) (update.$set as Record<string, unknown>).altUnit = altUnit;
+    const before = await Product.findOne({ _id: req.params.id, tenantId: req.auth!.tenantId }).lean();
+    const product = await Product.findOneAndUpdate({ _id: req.params.id, tenantId: req.auth!.tenantId }, update, { new: true });
     if (!product) return res.status(404).json({ error: "Product not found" });
+    if (before && (before.retailPrice !== product.retailPrice || before.wholesalePrice !== product.wholesalePrice || before.purchasePrice !== product.purchasePrice)) {
+      void recordAudit(req, "product.price", `${product.name}: retail ₹${before.retailPrice} → ₹${product.retailPrice}, wholesale ₹${before.wholesalePrice} → ₹${product.wholesalePrice}, cost ₹${before.purchasePrice} → ₹${product.purchasePrice}`, String(product._id));
+    }
     res.json(product);
   } catch (err) {
     res.status(409).json({ error: (err as Error).message });
   }
 });
 
-productsRouter.delete("/:id", async (req, res) => {
-  const product = await Product.findOneAndDelete({ _id: req.params.id, tenantId: req.auth!.tenantId });
+// Items with history (stock entries, bills) are archived, not erased, so old
+// bills and reports still show their names.
+productsRouter.delete("/:id", ownerOrManager, async (req, res) => {
+  const tenantId = req.auth!.tenantId!;
+  const product = await Product.findOne({ _id: req.params.id, tenantId });
   if (!product) return res.status(404).json({ error: "Product not found" });
+  const hasHistory = await StockMovement.exists({ tenantId, productId: product._id });
+  if (hasHistory) {
+    product.isActive = false;
+    await product.save();
+    void recordAudit(req, "product.archive", `Archived item ${product.name}`, String(product._id));
+    return res.json({ archived: true });
+  }
+  await product.deleteOne();
+  void recordAudit(req, "product.delete", `Deleted item ${product.name}`, String(product._id));
   res.status(204).send();
+});
+
+// Bulk add/update items from a spreadsheet (CSV or Excel, parsed in the app).
+// Rows are checked one by one; bad rows are reported back, good rows are saved.
+productsRouter.post("/import", ownerOrManager, async (req, res) => {
+  const parsed = importProductsSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const tenantId = req.auth!.tenantId!;
+  const existing = await Product.find({ tenantId }, { name: 1, sku: 1, barcode: 1 }).lean();
+  const bySku = new Map(existing.map((p) => [p.sku.toLowerCase(), p._id]));
+  const byBarcode = new Map(existing.filter((p) => p.barcode).map((p) => [p.barcode!.toLowerCase(), p._id]));
+  const byName = new Map(existing.map((p) => [p.name.trim().toLowerCase(), p._id]));
+  const warehouseId = await defaultWarehouseId(tenantId);
+
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  const errors: { row: number; message: string }[] = [];
+  const openings: Record<string, unknown>[] = [];
+
+  for (const [index, raw] of parsed.data.rows.entries()) {
+    const row = importRowSchema.safeParse(raw);
+    if (!row.success) {
+      const issue = row.error.issues[0];
+      errors.push({ row: index + 2, message: `${issue.path.join(".") || "row"}: ${issue.message}` });
+      continue;
+    }
+    const { openingStock, ...data } = row.data;
+    const fields = {
+      ...data,
+      wholesalePrice: data.wholesalePrice ?? data.retailPrice,
+      gstPercent: data.gstPercent ?? 0,
+      reorderLevel: data.reorderLevel ?? 0,
+    };
+    const matchId =
+      (data.sku && bySku.get(data.sku.toLowerCase())) ||
+      (data.barcode && byBarcode.get(data.barcode.toLowerCase())) ||
+      byName.get(data.name.toLowerCase());
+    try {
+      if (matchId) {
+        if (parsed.data.mode === "skip") {
+          skipped += 1;
+          continue;
+        }
+        const { sku: _sku, ...withoutSku } = fields;
+        void _sku;
+        await Product.updateOne({ _id: matchId, tenantId }, { $set: { ...withoutSku, isActive: true } });
+        updated += 1;
+      } else {
+        const sku = data.sku || generateSku(data.name);
+        const product = await Product.create({ ...fields, sku, tenantId });
+        bySku.set(sku.toLowerCase(), product._id);
+        byName.set(data.name.toLowerCase(), product._id);
+        if (data.barcode) byBarcode.set(data.barcode.toLowerCase(), product._id);
+        created += 1;
+        if (openingStock && openingStock > 0) {
+          openings.push({
+            tenantId,
+            productId: product._id,
+            warehouseId,
+            quantity: openingStock,
+            movementType: "opening",
+            note: "Opening stock (import)",
+            createdBy: req.auth!.userId,
+          });
+        }
+      }
+    } catch (err) {
+      errors.push({ row: index + 2, message: (err as Error).message.includes("duplicate") ? "SKU already used" : (err as Error).message });
+    }
+  }
+  if (openings.length) await StockMovement.insertMany(openings);
+  void recordAudit(req, "product.import", `Imported items: ${created} new, ${updated} updated, ${errors.length} with errors`);
+  res.json({ created, updated, skipped, errors: errors.slice(0, 200), errorCount: errors.length });
+});
+
+// Garments/footwear: one design in many sizes and colours → one item per combination.
+productsRouter.post("/variants", denyRoles("SALESMAN"), async (req, res) => {
+  const parsed = createVariantsSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { baseName, sizes, colors, ...rest } = parsed.data;
+  const tenantId = req.auth!.tenantId!;
+  const sizeList: (string | undefined)[] = sizes.length ? sizes : [undefined];
+  const colorList: (string | undefined)[] = colors.length ? colors : [undefined];
+  const combos = sizeList.flatMap((size) => colorList.map((color) => ({ size, color })));
+  if (combos.length > 200) return res.status(400).json({ error: "Too many combinations (max 200)" });
+  const docs = combos.map(({ size, color }) => {
+    const label = [size, color].filter(Boolean).join(" / ");
+    const name = label ? `${baseName} - ${label}` : baseName;
+    return { ...rest, tenantId, name, sku: generateSku(name), variantGroup: baseName, size, color };
+  });
+  const products = await Product.insertMany(docs);
+  void recordAudit(req, "product.variants", `Added ${products.length} variants of ${baseName}`);
+  res.status(201).json(products);
 });

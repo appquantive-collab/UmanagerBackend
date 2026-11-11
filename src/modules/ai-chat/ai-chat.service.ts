@@ -4,8 +4,8 @@ import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
 import { AiChatMessage, type ActionType, type AiChatMessageDocument } from "../../models/AiChatMessage";
 import { Customer } from "../../models/Customer";
 import { Staff } from "../../models/Staff";
-import { getDashboardSummary } from "../dashboard/dashboard.service";
-import { listAttendance, markAttendance } from "../attendance/attendance.service";
+import { buildFullBusinessContext } from "./business-context";
+import { markAttendance } from "../attendance/attendance.service";
 import { saveOrder } from "../orders/orders.service";
 import {
   createOrderActionSchema,
@@ -19,53 +19,52 @@ export class AiChatNotConfiguredError extends Error {
   }
 }
 
+// The model sometimes answered Roman-letter Hinglish in Devanagari; state the script explicitly.
+function scriptHint(message: string): string {
+  return /[\u0900-\u097F]/.test(message)
+    ? "The user wrote in Devanagari: reply in everyday Hindi written in Devanagari."
+    : "The user wrote in Roman (Latin) letters: reply ONLY in Roman letters — Hinglish if they used Hindi words, English if they wrote English. Do not use Devanagari.";
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function populatedName(value: unknown): string {
-  if (value && typeof value === "object" && "name" in value) {
-    return String((value as { name: unknown }).name);
-  }
-  return "Unknown";
-}
-
-// Compact, numbers-first snapshot of the business — fed to the model as
-// context on every turn so answers use real figures instead of guessing.
+// Full snapshot of the business (see business-context.ts) — fed to the model
+// on every turn so answers use real figures instead of guessing.
 async function buildBusinessContext(tenantId: string): Promise<string> {
-  const today = new Date().toISOString().slice(0, 10);
-  const [summary, todaysAttendance] = await Promise.all([
-    getDashboardSummary(tenantId),
-    listAttendance(tenantId, { date: today }),
-  ]);
-
-  return JSON.stringify({
-    todaySales: summary.todaySales,
-    todayOrderCount: summary.todayOrderCount,
-    yesterdaySales: summary.yesterdaySales,
-    monthSales: summary.monthSales,
-    receivables: summary.receivables,
-    overdueCustomerCount: summary.overdueCustomerCount,
-    topOverdueCustomerName: summary.topOverdueCustomerName,
-    topOverdueAmount: summary.topOverdueAmount,
-    inventoryValue: summary.inventoryValue,
-    totalSkus: summary.totalSkus,
-    lowStockCount: summary.lowStockCount,
-    lowStockItems: summary.lowStockItems,
-    topProducts: summary.topProducts.slice(0, 5),
-    recentOrders: summary.recentOrders.slice(0, 5),
-    todaysAttendance: todaysAttendance.map((a) => ({
-      staffName: populatedName(a.staffId),
-      status: a.status,
-    })),
-  });
+  return buildFullBusinessContext(tenantId);
 }
 
-const SYSTEM_PROMPT = `You are Munshi AI, the business assistant inside SethSathi, a wholesale/inventory management app for Indian shopkeepers. You answer questions about the business using the JSON snapshot of real data given to you — never invent numbers that aren't in it or derivable from it. Users may write in Hindi, Hinglish, or English (e.g. "Aaj kitni sale hui?", "आज कितनी सेल हुई?") — reply in the same language AND the same script as the user's message, concise and direct, with real figures in ₹. If they wrote Hindi in Roman letters, reply in Roman-script Hinglish; if they wrote in Devanagari, reply in Devanagari using everyday spoken Hindi (not formal or Sanskritized words).
+const SYSTEM_PROMPT = `You are Munshi AI, the business assistant inside SethSathi — an app Indian wholesalers, distributors and shopkeepers use for sales, purchases, stock, customers, suppliers, staff and GST. You are like a sharp, friendly munshi (accountant) who knows this business's books by heart.
 
-If the user explicitly asks you to DO something that changes data (mark attendance, create an order), call the matching tool with the details you can extract. Never call a tool for something the user only asked about — only when they are clearly asking you to perform the action. If required details are missing (e.g. which staff member, what date), ask a clarifying question in plain text instead of guessing or calling the tool with incomplete data.
+## Language
+Reply in the same language AND script as the user's latest message. Hindi in Roman letters → Roman-script Hinglish. Devanagari → everyday spoken Hindi in Devanagari (not formal/Sanskritized). English → simple English. Keep business words people actually use (stock, bill, GST, udhaar, party).
 
-You cannot act directly — calling a tool only proposes the action for the user to review and confirm themselves.`;
+## Answering business questions
+- A JSON snapshot of the business's real data is provided every turn: sales (today, yesterday, last 7 days, this/last month, top products), profit estimate, GST this month, purchases, dues, every product with live stock/prices/reorder level, warehouses, customers and suppliers with balances, recent bills and purchases, pending orders and staff with today's attendance.
+- Answer ANY question about the business from it: totals, comparisons ("this month vs last month"), a product's stock or price, who owes the most, which items to reorder, best sellers, a customer's or supplier's balance, a bill's status, GST payable, profit, staff present today, etc. Work things out (sums, differences, percentages, averages) when the data allows.
+- Never invent numbers, names or dates that are not in the snapshot or derivable from it. If something isn't in the data, say so plainly and tell them where in the app to look or how to record it.
+- If a value is 0 or a list is empty, say so clearly and suggest the next step (e.g. "No stock recorded yet — record a purchase or use Stock in/out in Inventory").
+- Lead with the answer (the number or name), then at most 2–3 short supporting lines. Use **bold** for key figures and short "- " bullet lists when listing items. No tables, no headings. Amounts in ₹ with Indian digit grouping (₹1,25,000).
+- You may give short, practical business advice when asked (pricing, reorder timing, collecting udhaar, slow-moving stock, GST basics), grounded in their data. For legal or tax filing, add that they should confirm with their CA.
+- If the question has nothing to do with business or SethSathi, politely say you help with their business and the app, and offer an example question.
+
+## How SethSathi works (use this to answer "how do I…" questions)
+- Sales: "New order" notes what a customer asked for (Munshi can read a pasted WhatsApp message). "New sale" makes a bill: tap "Counter sale" for a walk-in (no name; paid by cash/UPI/bank on the spot) or pick a customer (their pending order items load). Search items by name/SKU/barcode; set quantity, box or piece, discount %; choose simple or GST bill. Selling more than stock, or going over a customer's credit limit, shows a warning with "Bill anyway". Selling reduces stock automatically.
+- A bill can be printed (A4 or small thermal receipt), saved as PDF, or sent on WhatsApp; it shows a UPI QR for the amount due if the UPI ID is set in Settings → Bills. GST bills split CGST+SGST (same state) or IGST (other state) and show HSN, discount and round-off.
+- On a bill: record payments (part payments allowed), "Return items" makes a credit note (stock comes back; it first reduces what they owe, else refund by cash/UPI), owner/manager can "Cancel this bill" if made by mistake (only bills without payments, except counter sales).
+- Purchases: "New purchase" records a supplier bill — stock goes up automatically and the supplier's balance grows by what's unpaid. Batch number + expiry for medicines/food items, IMEI numbers for mobiles. Pay suppliers from the purchase.
+- Inventory: add items with cost, wholesale and retail price, GST rate and HSN, reorder level; "More options" sets a bigger pack (1 box = 12 pcs), batch & expiry tracking, IMEI/serial tracking, size and colour. "Import from Excel" brings a whole item list; "Sizes & colours" creates every size/colour of a design at once. Expiring-soon batches are listed. Raw materials + recipe (BOM) and assembly; QR labels.
+- Cash book (Rokad bahi): the day's sales, money received by cash/UPI/bank, money paid out (suppliers, expenses, refunds, salaries), and how much cash should be in the galla; add expenses (rent, electricity, tea, transport) and close the day by entering the counted cash.
+- Customers: phone, credit limit (max udhaar), GSTIN/address/state for GST bills, khata (ledger), WhatsApp reminders.
+- Suppliers, Warehouses (godowns/shops with stock value), Staff (schedules, attendance, payroll).
+- Reports: Sales, Purchases, Profit (estimate), Stock (incl. items not selling), Dues and GST, by period incl. the financial year; every table downloads as CSV for Excel/CA.
+- Settings: Business (name, phone, address, state), GST (GSTIN), Bills (UPI ID, bank details, terms; preview), Team (staff logins: manager, salesman, godown staff — each sees only their work), Activity (who made/cancelled which bill, price and stock changes), language, display size.
+- Search (top bar or Ctrl+K) finds any customer, product, bill, purchase, or an IMEI number.
+
+## Actions
+If the user explicitly asks you to DO something that changes data (mark attendance, create an order), call the matching tool with the details you can extract. Never call a tool for something the user only asked about. If required details are missing (which staff member, what date, which items), ask a short clarifying question instead of guessing. You cannot act directly — calling a tool only proposes the action for the user to review and confirm.`;
 
 const tools = [
   {
@@ -145,6 +144,7 @@ export async function sendMessage(tenantId: string, userId: string, content: str
         .reverse()
         .slice(0, -1) // the just-created user message is appended explicitly below
         .map((m) => ({ role: m.role, content: m.content })),
+      { role: "system", content: scriptHint(content) },
       { role: "user", content },
     ],
   });
@@ -264,4 +264,35 @@ export async function dismissAction(tenantId: string, messageId: string) {
   message.proposedAction.status = "dismissed";
   await message.save();
   return message;
+}
+
+/**
+ * AI search: a one-off question answered from the business snapshot. Not saved
+ * to the Munshi AI chat history and never proposes actions — just a short answer.
+ */
+export async function askBusinessQuestion(tenantId: string, question: string): Promise<string> {
+  if (!env.groqApiKey) {
+    throw new AiChatNotConfiguredError();
+  }
+  const context = await buildBusinessContext(tenantId);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const response = await getGroqClient().chat.completions.create({
+    model: GROQ_CHAT_MODEL,
+    reasoning_effort: "low",
+    max_completion_tokens: 900,
+    temperature: 0.3,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      {
+        role: "system",
+        content:
+          "This is a quick search, not a chat: answer in 1 to 3 short sentences (or a very short list), lead with the number or name asked for, no markdown headings. Do not offer to create orders or mark attendance here.",
+      },
+      { role: "system", content: `Today's date: ${today}. Business data snapshot (JSON): ${context}` },
+      { role: "system", content: scriptHint(question) },
+      { role: "user", content: question },
+    ],
+  });
+  return response.choices[0]?.message?.content?.trim() || "";
 }

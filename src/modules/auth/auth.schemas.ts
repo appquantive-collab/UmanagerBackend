@@ -34,3 +34,20 @@ export const refreshSchema = z.object({
 export const updateProfileSchema = z.object({
   preferredLanguage: z.enum(["en", "hi", "hi-Latn"]).optional(),
 });
+
+export const googleSignInSchema = z.object({
+  credential: z.string().min(20),
+});
+
+export const appleSignInSchema = z.object({
+  idToken: z.string().min(20),
+  // Apple gives the name to the browser on the first sign-in only.
+  name: z.string().trim().max(100).optional(),
+});
+
+export const socialCompleteSchema = z.object({
+  signupToken: z.string().min(20),
+  businessName: z.string().trim().min(2),
+  phone: z.string().regex(/^\d{10}$/),
+  preferredLanguage: z.enum(["en", "hi", "hi-Latn"]).optional(),
+});

@@ -66,6 +66,10 @@ export async function login(email: string, password: string) {
     throw new Error("Invalid credentials");
   }
 
+  // Google/Apple accounts have no password.
+  if (!user.passwordHash) {
+    throw new Error("Invalid credentials");
+  }
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) {
     throw new Error("Invalid credentials");
@@ -222,12 +226,21 @@ export async function getProfile(userId: string) {
           currency: tenant.currency,
           onboarding: tenant.onboarding,
           aiDashboardLayout: tenant.aiDashboardLayout,
+          phone: tenant.phone,
+          gstin: tenant.gstin,
+          address: tenant.address,
+          stateCode: tenant.stateCode,
+          upiId: tenant.upiId,
+          bankName: tenant.bankName,
+          bankAccount: tenant.bankAccount,
+          bankIfsc: tenant.bankIfsc,
+          invoiceTerms: tenant.invoiceTerms,
         }
       : null,
   };
 }
 
-function issueTokens(user: {
+export function issueTokens(user: {
   _id: unknown;
   tenantId: unknown;
   role: string;

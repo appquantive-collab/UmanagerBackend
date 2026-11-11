@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth, requireTenant } from "../../middleware/auth";
-import { sendMessageSchema } from "./ai-chat.schemas";
-import { AiChatNotConfiguredError, confirmAction, dismissAction, listMessages, sendMessage } from "./ai-chat.service";
+import { askQuestionSchema, sendMessageSchema } from "./ai-chat.schemas";
+import { AiChatNotConfiguredError, askBusinessQuestion, confirmAction, dismissAction, listMessages, sendMessage } from "./ai-chat.service";
 
 export const aiChatRouter = Router();
 
@@ -42,5 +42,19 @@ aiChatRouter.post("/messages/:id/dismiss", async (req, res) => {
     res.json(message);
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+// AI search: a quick, stateless question about the business (see askBusinessQuestion).
+aiChatRouter.post("/ask", async (req, res) => {
+  const parsed = askQuestionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const answer = await askBusinessQuestion(req.auth!.tenantId!, parsed.data.question);
+    res.json({ answer });
+  } catch (err) {
+    if (err instanceof AiChatNotConfiguredError) return res.status(503).json({ error: err.message });
+    console.error("[ai-chat] ask failed:", (err as Error).message);
+    res.status(502).json({ error: "Munshi AI could not answer right now. Please try again." });
   }
 });

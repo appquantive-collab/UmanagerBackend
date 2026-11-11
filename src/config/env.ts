@@ -36,4 +36,8 @@ export const env = {
   // Hosted Textbelt (textbelt.com) key for login OTP SMS. Without it, OTPs are
   // printed to the server console in development and refused in production.
   textbeltApiKey: process.env.TEXTBELT_API_KEY || null,
+  // Social sign-in. Google: OAuth Web client ID. Apple: the Services ID used by Sign in with Apple JS.
+  // Each provider stays off until its ID is set.
+  googleClientId: process.env.GOOGLE_CLIENT_ID || null,
+  appleClientId: process.env.APPLE_CLIENT_ID || null,
 };
