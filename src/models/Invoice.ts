@@ -36,6 +36,7 @@ export interface PartySnapshot {
   name?: string;
   phone?: string;
   gstin?: string;
+  aadhaarLast4?: string;
   address?: string;
   stateCode?: string;
 }
@@ -73,6 +74,10 @@ export interface InvoiceDocument {
   buyer?: PartySnapshot;
   dueDate?: Date;
   cancelledAt?: Date;
+  /** Last time the bill's items were changed after it was made. */
+  editedAt?: Date | null;
+  /** Hidden from the bill list (still counts in accounts, unlike a cancelled bill). */
+  archivedAt?: Date | null;
   cancelReason?: string;
   createdBy: Types.ObjectId;
   createdAt: Date;
@@ -118,6 +123,8 @@ const partySnapshotSchema = new Schema<SellerSnapshot>(
     gstin: { type: String, trim: true },
     address: { type: String, trim: true },
     stateCode: { type: String, trim: true },
+    // Buyer only: last 4 Aadhaar digits, printed masked (XXXX XXXX 1234).
+    aadhaarLast4: { type: String, trim: true },
     upiId: { type: String, trim: true },
     bankName: { type: String, trim: true },
     bankAccount: { type: String, trim: true },
@@ -153,6 +160,8 @@ const invoiceSchema = new Schema<InvoiceDocument>(
     buyer: { type: partySnapshotSchema },
     dueDate: { type: Date },
     cancelledAt: { type: Date },
+    editedAt: { type: Date, default: null },
+    archivedAt: { type: Date, default: null },
     cancelReason: { type: String, trim: true },
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
   },

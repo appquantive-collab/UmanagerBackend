@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { assertPro, sendPlanError } from "../billing/subscription.service";
 import QRCode from "qrcode";
 import { Product } from "../../models/Product";
 import { denyRoles, ownerOrManager, requireAuth, requireTenant } from "../../middleware/auth";
@@ -52,6 +53,8 @@ productsRouter.post("/", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   try {
+    if (parsed.data.trackBatch) await assertPro(req.auth!.tenantId!, "batch");
+    if (parsed.data.trackSerial) await assertPro(req.auth!.tenantId!, "serial");
     if (parsed.data.bom.length > 0) {
       await validateBom(req.auth!.tenantId!, parsed.data.bom);
     }
@@ -59,6 +62,7 @@ productsRouter.post("/", async (req, res) => {
     const product = await Product.create({ ...parsed.data, sku, tenantId: req.auth!.tenantId });
     res.status(201).json(product);
   } catch (err) {
+    if (sendPlanError(res, err)) return;
     res.status(409).json({ error: (err as Error).message });
   }
 });
@@ -76,6 +80,8 @@ productsRouter.patch("/:id", denyRoles("SALESMAN"), async (req, res) => {
     if (altUnit === null) update.$unset = { altUnit: "" };
     else if (altUnit) (update.$set as Record<string, unknown>).altUnit = altUnit;
     const before = await Product.findOne({ _id: req.params.id, tenantId: req.auth!.tenantId }).lean();
+    if (parsed.data.trackBatch && !before?.trackBatch) await assertPro(req.auth!.tenantId!, "batch");
+    if (parsed.data.trackSerial && !before?.trackSerial) await assertPro(req.auth!.tenantId!, "serial");
     const product = await Product.findOneAndUpdate({ _id: req.params.id, tenantId: req.auth!.tenantId }, update, { new: true });
     if (!product) return res.status(404).json({ error: "Product not found" });
     if (before && (before.retailPrice !== product.retailPrice || before.wholesalePrice !== product.wholesalePrice || before.purchasePrice !== product.purchasePrice)) {
@@ -83,6 +89,7 @@ productsRouter.patch("/:id", denyRoles("SALESMAN"), async (req, res) => {
     }
     res.json(product);
   } catch (err) {
+    if (sendPlanError(res, err)) return;
     res.status(409).json({ error: (err as Error).message });
   }
 });
@@ -111,6 +118,12 @@ productsRouter.post("/import", ownerOrManager, async (req, res) => {
   const parsed = importProductsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const tenantId = req.auth!.tenantId!;
+  try {
+    await assertPro(tenantId, "import");
+  } catch (err) {
+    if (sendPlanError(res, err)) return;
+    throw err;
+  }
   const existing = await Product.find({ tenantId }, { name: 1, sku: 1, barcode: 1 }).lean();
   const bySku = new Map(existing.map((p) => [p.sku.toLowerCase(), p._id]));
   const byBarcode = new Map(existing.filter((p) => p.barcode).map((p) => [p.barcode!.toLowerCase(), p._id]));
@@ -185,6 +198,12 @@ productsRouter.post("/variants", denyRoles("SALESMAN"), async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { baseName, sizes, colors, ...rest } = parsed.data;
   const tenantId = req.auth!.tenantId!;
+  try {
+    await assertPro(tenantId, "variants");
+  } catch (err) {
+    if (sendPlanError(res, err)) return;
+    throw err;
+  }
   const sizeList: (string | undefined)[] = sizes.length ? sizes : [undefined];
   const colorList: (string | undefined)[] = colors.length ? colors : [undefined];
   const combos = sizeList.flatMap((size) => colorList.map((color) => ({ size, color })));

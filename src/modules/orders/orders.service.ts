@@ -3,6 +3,7 @@ import { Customer } from "../../models/Customer";
 import { Product } from "../../models/Product";
 import { Order, type OrderStatus } from "../../models/Order";
 import { parseOrderText, type ParsedOrder } from "./order-parser.service";
+import { assertPro } from "../billing/subscription.service";
 import { generateSku } from "../../utils/sku";
 import { getProducibleQuantity } from "../assembly/assembly.service";
 import type { z } from "zod";
@@ -31,10 +32,11 @@ export interface ParsePreview {
 // separately looks up customer name candidates — but nothing is created here.
 // Customer creation always stays an explicit user action (see saveOrder).
 export async function previewOrderFromText(tenantId: string, text: string): Promise<ParsePreview> {
+  await assertPro(tenantId, "orderReading");
   const products = await Product.find({ tenantId, isActive: true }, { name: 1 }).lean();
   const catalog = products.map((p) => ({ id: String(p._id), name: p.name }));
 
-  const parsed: ParsedOrder = await parseOrderText(text, catalog);
+  const parsed: ParsedOrder = await parseOrderText(tenantId, text, catalog);
 
   const matchedCustomers = parsed.partyName
     ? await Customer.find(

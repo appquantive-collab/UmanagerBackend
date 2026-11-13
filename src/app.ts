@@ -28,14 +28,23 @@ import { expensesRouter } from "./modules/expenses/expenses.controller";
 import { daybookRouter } from "./modules/daybook/daybook.controller";
 import { teamRouter } from "./modules/team/team.controller";
 import { auditRouter } from "./modules/audit/audit.controller";
+import { billingRouter } from "./modules/billing/billing.controller";
 import { denyRoles, ownerOrManager, requireAuth } from "./middleware/auth";
+import { planGate } from "./middleware/planGate";
 
 export function createApp() {
   const app = express();
 
   app.use(helmet());
   app.use(cors({ origin: env.corsOrigins, credentials: true }));
-  app.use(express.json());
+  // rawBody is kept for the Razorpay webhook signature check.
+  app.use(
+    express.json({
+      verify: (req, _res, buf) => {
+        (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+      },
+    })
+  );
   app.use(morgan(env.nodeEnv === "development" ? "dev" : "combined"));
 
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
@@ -47,7 +56,11 @@ export function createApp() {
   const notWarehouse = [requireAuth, denyRoles("WAREHOUSE_STAFF")];
   const managersOnly = [requireAuth, ownerOrManager];
 
+  // Ended plan → read-only (see middleware/planGate).
+  app.use(planGate);
+
   app.use("/api/auth", authRouter);
+  app.use("/api/billing", billingRouter);
   app.use("/api/products", productsRouter);
   app.use("/api/warehouses", warehousesRouter);
   app.use("/api/stock", stockRouter);

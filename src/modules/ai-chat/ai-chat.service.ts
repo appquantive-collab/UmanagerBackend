@@ -1,6 +1,7 @@
 import { HydratedDocument } from "mongoose";
 import { env } from "../../config/env";
 import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
+import { assertAiTokens, recordAiTokens } from "../billing/subscription.service";
 import { AiChatMessage, type ActionType, type AiChatMessageDocument } from "../../models/AiChatMessage";
 import { Customer } from "../../models/Customer";
 import { Staff } from "../../models/Staff";
@@ -125,6 +126,7 @@ export async function sendMessage(tenantId: string, userId: string, content: str
   if (!env.groqApiKey) {
     throw new AiChatNotConfiguredError();
   }
+  await assertAiTokens(tenantId);
 
   const userMessage = await AiChatMessage.create({ tenantId, role: "user", content, createdBy: userId });
 
@@ -149,6 +151,7 @@ export async function sendMessage(tenantId: string, userId: string, content: str
     ],
   });
 
+  await recordAiTokens(tenantId, response.usage);
   const choice = response.choices[0];
   const rawToolCall = choice?.message?.tool_calls?.[0];
   const toolCall = rawToolCall && rawToolCall.type === "function" ? rawToolCall : undefined;
@@ -274,6 +277,7 @@ export async function askBusinessQuestion(tenantId: string, question: string): P
   if (!env.groqApiKey) {
     throw new AiChatNotConfiguredError();
   }
+  await assertAiTokens(tenantId);
   const context = await buildBusinessContext(tenantId);
   const today = new Date().toISOString().slice(0, 10);
 
@@ -294,5 +298,6 @@ export async function askBusinessQuestion(tenantId: string, question: string): P
       { role: "user", content: question },
     ],
   });
+  await recordAiTokens(tenantId, response.usage);
   return response.choices[0]?.message?.content?.trim() || "";
 }

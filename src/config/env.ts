@@ -40,4 +40,18 @@ export const env = {
   // Each provider stays off until its ID is set.
   googleClientId: process.env.GOOGLE_CLIENT_ID || null,
   appleClientId: process.env.APPLE_CLIENT_ID || null,
+  // Plan payments. Online checkout stays off (owners see "contact us") until the
+  // key ID and secret are set; use rzp_test_ keys first. The webhook secret is
+  // the one entered in Razorpay Dashboard → Webhooks for /api/billing/webhook.
+  razorpay: {
+    keyId: process.env.RAZORPAY_KEY_ID || null,
+    keySecret: process.env.RAZORPAY_KEY_SECRET || null,
+    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || null,
+  },
+  // SethSathi's own team: these sign-in emails can see every business and give
+  // or extend plans by hand (offline payments, free months). Comma-separated.
+  platformAdminEmails: (process.env.PLATFORM_ADMIN_EMAILS ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean),
 };

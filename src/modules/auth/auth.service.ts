@@ -6,6 +6,7 @@ import { Tenant } from "../../models/Tenant";
 import { User, type PreferredLanguage } from "../../models/User";
 import { signAccessToken, signRefreshToken } from "../../utils/tokens";
 import { SmsNotConfiguredError, sendSms } from "./sms.service";
+import { loadSubscription, planState } from "../billing/subscription.service";
 
 interface RegisterInput {
   businessName: string;
@@ -208,6 +209,8 @@ export async function getProfile(userId: string) {
   }
 
   const tenant = user.tenantId ? await Tenant.findById(user.tenantId) : null;
+  const subscription = tenant ? planState(await loadSubscription(String(tenant._id))) : null;
+  const platformAdmin = Boolean(user.email && env.platformAdminEmails.includes(user.email.toLowerCase()));
 
   return {
     userId: String(user._id),
@@ -216,6 +219,8 @@ export async function getProfile(userId: string) {
     phone: user.phone,
     role: user.role,
     preferredLanguage: user.preferredLanguage,
+    /** SethSathi team member (PLATFORM_ADMIN_EMAILS): can give plans to any business. */
+    platformAdmin,
     tenant: tenant
       ? {
           tenantId: String(tenant._id),
@@ -226,6 +231,8 @@ export async function getProfile(userId: string) {
           currency: tenant.currency,
           onboarding: tenant.onboarding,
           aiDashboardLayout: tenant.aiDashboardLayout,
+          appSetup: tenant.appSetup ?? null,
+          subscription,
           phone: tenant.phone,
           gstin: tenant.gstin,
           address: tenant.address,

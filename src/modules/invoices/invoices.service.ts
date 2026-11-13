@@ -1,4 +1,4 @@
-import mongoose, { Types } from "mongoose";
+import mongoose, { Types, type HydratedDocument } from "mongoose";
 import { Order } from "../../models/Order";
 import { Product, type ProductDocument } from "../../models/Product";
 import { Customer } from "../../models/Customer";
@@ -10,6 +10,7 @@ import {
   type BillType,
   type InvoiceLineItem,
   type PaymentMethod,
+  type InvoiceDocument,
 } from "../../models/Invoice";
 import { generateSku } from "../../utils/sku";
 import {
@@ -36,7 +37,10 @@ export class BillError extends Error {
       | "CANCELLED"
       | "SERIAL_REQUIRED"
       | "SERIAL_NOT_IN_STOCK"
-      | "RETURN_TOO_MUCH",
+      | "RETURN_TOO_MUCH"
+      | "BILL_NUMBER_TAKEN"
+      | "BELOW_PAID"
+      | "HAS_RETURN",
     readonly details?: unknown
   ) {
     super(message);
@@ -46,11 +50,35 @@ export class BillError extends Error {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-async function nextInvoiceNumber(tenantId: string): Promise<string> {
-  // Per-tenant sequential numbering: INV-0001, INV-0002, ... Cancelled bills keep
-  // their number, so the sequence never has gaps (as GST rules expect).
+/**
+ * Next bill number. Follows the shop's own series: after "AM/2026/014" comes
+ * "AM/2026/015"; with no bills yet it's INV-0001. Cancelled bills keep their
+ * number, so the series has no gaps (as GST rules expect). Skips any number
+ * already used (e.g. typed by hand).
+ */
+export async function nextInvoiceNumber(tenantId: string): Promise<string> {
+  const last = await Invoice.findOne({ tenantId }, { invoiceNumber: 1 }).sort({ createdAt: -1, _id: -1 }).lean();
   const count = await Invoice.countDocuments({ tenantId });
-  return `INV-${String(count + 1).padStart(4, "0")}`;
+  const match = last?.invoiceNumber.match(/^(.*?)(\d+)$/);
+  let prefix = "INV-";
+  let n = count + 1;
+  let width = 4;
+  if (match) {
+    prefix = match[1];
+    n = Number(match[2]) + 1;
+    width = match[2].length;
+  }
+  for (let i = 0; i < 1000; i++, n++) {
+    const candidate = `${prefix}${String(n).padStart(width, "0")}`;
+    if (!(await Invoice.exists({ tenantId, invoiceNumber: candidate }))) return candidate;
+  }
+  return `INV-${Date.now()}`;
+}
+
+/** A bill number must be unique within the business. */
+export async function assertBillNumberFree(tenantId: string, invoiceNumber: string, exceptId?: string) {
+  const clash = await Invoice.exists({ tenantId, invoiceNumber, ...(exceptId ? { _id: { $ne: exceptId } } : {}) });
+  if (clash) throw new BillError(`Bill number ${invoiceNumber} is already used`, 409, "BILL_NUMBER_TAKEN", { invoiceNumber });
 }
 
 /** The shared "Walk-in customer" for quick counter sales (created on first use). */
@@ -115,6 +143,8 @@ interface BillLineItemInput {
   unit: string;
   unitPrice: number;
   discountPercent?: number;
+  /** GST % picked on the bill (else the item's saved rate). */
+  gstPercent?: number;
   /** IMEI / serial numbers sold, for serial-tracked items. */
   serials?: string[];
 }
@@ -125,6 +155,8 @@ interface CreateBillInput {
   orderIds: string[];
   items: BillLineItemInput[];
   billType: BillType;
+  /** Own bill number; omitted → next in the series. */
+  invoiceNumber?: string;
   dueDate?: string;
   /** Round the total to the nearest rupee (default on). */
   roundOff?: boolean;
@@ -156,7 +188,12 @@ async function customerOutstanding(tenantId: string, customerId: Types.ObjectId)
 
 // Order of work: validate everything (orders, stock, credit) BEFORE saving
 // anything, so a stopped bill leaves no stray products, numbers or stock entries.
-export async function createBill(tenantId: string, userId: string, input: CreateBillInput) {
+/**
+ * Makes a bill — or, with `editing`, re-makes an existing one in place (same
+ * number and payments; see editBill, which has already put its old items back
+ * in stock before calling this).
+ */
+export async function createBill(tenantId: string, userId: string, input: CreateBillInput, editing?: HydratedDocument<InvoiceDocument>) {
   const customer = input.customerId
     ? await Customer.findOne({ _id: input.customerId, tenantId })
     : await getWalkInCustomer(tenantId);
@@ -164,7 +201,7 @@ export async function createBill(tenantId: string, userId: string, input: Create
     throw new BillError("Customer not found", 404);
   }
 
-  if (input.orderIds.length > 0) {
+  if (!editing && input.orderIds.length > 0) {
     const orders = await Order.find({ _id: { $in: input.orderIds }, tenantId });
     if (orders.length !== input.orderIds.length) {
       throw new BillError("One or more orders were not found", 404);
@@ -237,7 +274,7 @@ export async function createBill(tenantId: string, userId: string, input: Create
   // ---- Amounts: discount → GST (CGST+SGST or IGST) → round-off ----
   const lines = input.items.map((item) => {
     const product = item.productId ? productById.get(item.productId) : undefined;
-    const gstPercent = input.billType === "gst" ? (product?.gstPercent ?? 0) : 0;
+    const gstPercent = input.billType === "gst" ? (item.gstPercent ?? product?.gstPercent ?? 0) : 0;
     const discountPercent = Math.min(100, Math.max(0, item.discountPercent ?? 0));
     const gross = item.quantity * item.unitPrice;
     const lineSubtotal = round2(gross * (1 - discountPercent / 100));
@@ -276,13 +313,24 @@ export async function createBill(tenantId: string, userId: string, input: Create
   // ---- Credit limit (not for walk-in) ----
   // Counter (walk-in) sales are paid on the spot: with no payment given, the
   // whole amount is taken as received in cash, so "Walk-in" never shows as owing.
-  const paidNow = round2(
-    Math.min(totalAmount, input.payment?.amount ?? (customer.isWalkIn ? totalAmount : 0))
-  );
+  // Editing: money already received stays; a counter sale stays fully paid.
+  const paidNow = editing
+    ? customer.isWalkIn
+      ? totalAmount
+      : editing.amountPaid
+    : round2(Math.min(totalAmount, input.payment?.amount ?? (customer.isWalkIn ? totalAmount : 0)));
+  if (editing && !customer.isWalkIn && editing.amountPaid > totalAmount + 0.01) {
+    throw new BillError("The new total is less than the money already received. Make a return instead.", 409, "BELOW_PAID", {
+      paid: editing.amountPaid,
+      newTotal: totalAmount,
+    });
+  }
   const paidMethod: PaymentMethod = input.payment?.method ?? "cash";
 
   if (!customer.isWalkIn && customer.creditLimit > 0 && !input.allowOverCreditLimit) {
-    const outstanding = await customerOutstanding(tenantId, customer._id);
+    // When editing, this bill's own old balance isn't counted twice.
+    const outstanding =
+      (await customerOutstanding(tenantId, customer._id)) - (editing ? Math.max(0, editing.totalAmount - editing.amountPaid) : 0);
     if (outstanding + totalAmount - paidNow > customer.creditLimit + 0.01) {
       throw new BillError("This bill takes the customer over their credit limit", 409, "CREDIT_LIMIT", {
         creditLimit: customer.creditLimit,
@@ -293,7 +341,20 @@ export async function createBill(tenantId: string, userId: string, input: Create
     }
   }
 
+  if (input.invoiceNumber && input.invoiceNumber !== editing?.invoiceNumber) {
+    await assertBillNumberFree(tenantId, input.invoiceNumber, editing ? String(editing._id) : undefined);
+  }
+
   // ---- All checks passed: now save ----
+  // A GST rate picked on the bill for an item saved without one becomes its rate.
+  if (input.billType === "gst") {
+    for (const item of input.items) {
+      const product = item.productId ? productById.get(item.productId) : undefined;
+      if (product && !product.gstPercent && item.gstPercent) {
+        await Product.updateOne({ _id: product._id, tenantId }, { $set: { gstPercent: item.gstPercent } });
+      }
+    }
+  }
   const items: InvoiceLineItem[] = [];
   for (const { input: item, line } of lines) {
     let productId: Types.ObjectId;
@@ -310,17 +371,18 @@ export async function createBill(tenantId: string, userId: string, input: Create
         wholesalePrice: item.unitPrice,
         retailPrice: item.unitPrice,
         reorderLevel: 0,
+        gstPercent: input.billType === "gst" ? item.gstPercent ?? 0 : 0,
       });
       productId = created._id;
     }
     items.push({ ...line, productId });
   }
 
-  const invoice = await Invoice.create({
+  const fields = {
     tenantId,
     orderIds: input.orderIds,
     customerId: customer._id,
-    invoiceNumber: await nextInvoiceNumber(tenantId),
+    invoiceNumber: input.invoiceNumber ?? (editing ? editing.invoiceNumber : await nextInvoiceNumber(tenantId)),
     billType: input.billType,
     status: "active",
     items,
@@ -354,16 +416,36 @@ export async function createBill(tenantId: string, userId: string, input: Create
       name: customer.name,
       phone: customer.phone,
       gstin: customer.gstin,
+      aadhaarLast4: customer.aadhaarLast4,
       address: customer.address,
       stateCode: buyerState,
     },
     dueDate: input.dueDate ? new Date(input.dueDate) : undefined,
     createdBy: userId,
-  });
+  };
+
+  let invoice: HydratedDocument<InvoiceDocument>;
+  if (editing) {
+    const first = editing.payments[0];
+    editing.set({
+      ...fields,
+      orderIds: editing.orderIds,
+      createdBy: editing.createdBy,
+      dueDate: input.dueDate ? new Date(input.dueDate) : editing.dueDate,
+      // Counter sale: the one cash/UPI payment follows the corrected total.
+      payments: customer.isWalkIn
+        ? [{ amount: totalAmount, method: first?.method ?? paidMethod, paidAt: first?.paidAt ?? new Date() }]
+        : editing.payments,
+      editedAt: new Date(),
+    });
+    invoice = await editing.save();
+  } else {
+    invoice = await Invoice.create(fields);
+  }
 
   await deductStock(tenantId, userId, invoice.invoiceNumber, String(invoice._id), items, productById, stock, serialPlaces);
 
-  if (input.orderIds.length > 0) {
+  if (!editing && input.orderIds.length > 0) {
     await applyFulfillment(
       tenantId,
       input.orderIds,
@@ -502,25 +584,8 @@ export async function cancelBill(tenantId: string, userId: string, invoiceId: st
     }
   }
 
-  // Put back exactly what this bill took out, warehouse by warehouse.
-  const taken = await StockMovement.find({ tenantId, referenceId: String(invoice._id), movementType: "sale" });
-  if (taken.length > 0) {
-    await StockMovement.insertMany(
-      taken.map((m) => ({
-        tenantId,
-        productId: m.productId,
-        warehouseId: m.warehouseId,
-        quantity: -m.quantity,
-        movementType: "adjustment",
-        referenceId: String(invoice._id),
-        batchNo: m.batchNo,
-        expiryDate: m.expiryDate,
-        serials: m.serials?.length ? m.serials : undefined,
-        note: `Cancelled ${invoice.invoiceNumber}`,
-        createdBy: userId,
-      }))
-    );
-  }
+  // Put back exactly what this bill still holds out, warehouse by warehouse.
+  await putBillStockBack(tenantId, userId, String(invoice._id), `Cancelled ${invoice.invoiceNumber}`);
 
   // Reopen the orders this bill came from, with the billed quantities restored.
   const byOrder = new Map<string, InvoiceLineItem[]>();
@@ -590,4 +655,76 @@ export async function recordPayment(
 
   await invoice.save();
   return invoice;
+}
+
+/**
+ * Returns to stock what a bill currently holds out: its sale entries minus any
+ * earlier put-backs (an edited bill has both). Grouped by item, warehouse and
+ * batch; IMEI/serial numbers are netted the same way.
+ */
+async function putBillStockBack(tenantId: string, userId: string, invoiceId: string, note: string) {
+  const moves = await StockMovement.find({ tenantId, referenceId: invoiceId, movementType: { $in: ["sale", "adjustment"] } });
+  const groups = new Map<string, { productId: Types.ObjectId; warehouseId: unknown; batchNo?: string; expiryDate?: Date; qty: number; serials: Map<string, number> }>();
+  for (const m of moves) {
+    const key = [String(m.productId), String(m.warehouseId ?? ""), m.batchNo ?? ""].join("|");
+    const g = groups.get(key) ?? { productId: m.productId, warehouseId: m.warehouseId, batchNo: m.batchNo ?? undefined, expiryDate: m.expiryDate ?? undefined, qty: 0, serials: new Map<string, number>() };
+    g.qty += m.quantity;
+    for (const sn of m.serials ?? []) g.serials.set(sn, (g.serials.get(sn) ?? 0) + (m.quantity < 0 ? 1 : -1));
+    groups.set(key, g);
+  }
+  const back = [...groups.values()]
+    .filter((g) => g.qty < -1e-9)
+    .map((g) => {
+      const out = [...g.serials.entries()].filter(([, n]) => n > 0).map(([sn]) => sn);
+      return {
+        tenantId,
+        productId: g.productId,
+        warehouseId: g.warehouseId,
+        quantity: Math.round(-g.qty * 1000) / 1000,
+        movementType: "adjustment" as const,
+        referenceId: invoiceId,
+        batchNo: g.batchNo,
+        expiryDate: g.expiryDate,
+        serials: out.length ? out : undefined,
+        note,
+        createdBy: userId,
+      };
+    });
+  if (back.length > 0) await StockMovement.insertMany(back);
+  return back;
+}
+
+/**
+ * Change a bill after it was made: items, quantities, rates, GST %, discount,
+ * bill type or number. Same checks as a new bill (stock, credit limit, IMEI).
+ * Money already received stays on the bill; the customer can't be changed here.
+ * A bill with a return on it can't be edited (its credit note depends on it).
+ */
+export async function editBill(tenantId: string, userId: string, invoiceId: string, input: Omit<CreateBillInput, "customerId" | "orderIds" | "payment">) {
+  const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
+  if (!invoice) throw new BillError("Bill not found", 404);
+  if (invoice.status === "cancelled") throw new BillError("This bill is cancelled", 400, "CANCELLED");
+  if (invoice.payments.some((p) => p.method === "credit_note")) {
+    throw new BillError("This bill has a return on it, so it can't be edited.", 400, "HAS_RETURN");
+  }
+
+  // 1. Old items go back into stock, so the new items are checked against real stock.
+  const putBack = await putBillStockBack(tenantId, userId, String(invoice._id), `Editing ${invoice.invoiceNumber}: old items back`);
+  try {
+    // 2. Same path as a new bill, saved onto this one.
+    return await createBill(
+      tenantId,
+      userId,
+      { ...input, customerId: String(invoice.customerId), orderIds: invoice.orderIds.map(String) },
+      invoice
+    );
+  } catch (err) {
+    // 3. Stopped (short stock, credit limit…): take the old items out again, nothing else changed.
+    if (putBack.length > 0) {
+      await StockMovement.insertMany(
+        putBack.map((m) => ({ ...m, quantity: -m.quantity, note: `Edit of ${invoice.invoiceNumber} not saved` }))
+      );
+    }
+    throw err;
+  }
 }

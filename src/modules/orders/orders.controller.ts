@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { Order } from "../../models/Order";
 import { requireAuth, requireTenant } from "../../middleware/auth";
+import { sendPlanError } from "../billing/subscription.service";
 import { createOrderSchema, parseOrderTextSchema, updateOrderSchema, updateOrderStatusSchema } from "./orders.schemas";
 import { previewOrderFromText, saveOrder, updateOrder, updateOrderStatus } from "./orders.service";
 import { AiNotConfiguredError } from "./order-parser.service";
@@ -38,6 +39,7 @@ ordersRouter.post("/parse", async (req, res) => {
     const preview = await previewOrderFromText(req.auth!.tenantId!, parsed.data.text);
     res.json(preview);
   } catch (err) {
+    if (sendPlanError(res, err)) return;
     if (err instanceof AiNotConfiguredError) {
       return res.status(503).json({ error: err.message });
     }

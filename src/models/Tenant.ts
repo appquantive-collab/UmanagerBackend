@@ -2,6 +2,18 @@ import { Schema, model, Types } from "mongoose";
 
 export type TenantStatus = "trial" | "active" | "suspended";
 
+export type PlanKey = "basic" | "pro";
+export type BillingPeriod = "monthly" | "quarterly" | "annual";
+
+/** Paid plan state. null plan = still on the free trial (see modules/billing). */
+export interface Subscription {
+  plan: PlanKey | null;
+  period: BillingPeriod | null;
+  trialEndsAt: Date | null;
+  /** Paid access runs until this moment. */
+  currentPeriodEnd: Date | null;
+}
+
 export type BusinessCategory =
   | "fmcg"
   | "electronics"
@@ -60,8 +72,40 @@ export type BusinessGoal =
   | "ai_insights"
   | "reporting";
 
+export type BusinessRole = "retailer" | "trader" | "manufacturer";
+export type OnlineChannel = "website" | "marketplace" | "social";
+
+/** Which parts of the app this business uses — set by the setup template, changeable in Settings. */
+export interface AppFeatures {
+  counterSale: boolean;
+  orders: boolean;
+  purchases: boolean;
+  warehouses: boolean;
+  rawMaterials: boolean;
+  batch: boolean;
+  serial: boolean;
+  variants: boolean;
+  staff: boolean;
+  creditLimits: boolean;
+  /** Daily galla count (Rokad bahi). Unset on older setups — the app then follows counterSale. */
+  cashbook?: boolean;
+}
+
+export interface AppSetup {
+  template: string;
+  defaultBillType: "gst" | "record";
+  features: AppFeatures;
+}
+
 export interface BusinessOnboarding {
   completed: boolean;
+  /** In their own words: "kirana dukaan", "namkeen banate hain"… */
+  description: string | null;
+  roles: BusinessRole[];
+  sellsOnline: OnlineChannel[];
+  onlineStoreUrl: string | null;
+  hasGst: boolean | null;
+  template: string | null;
   category: BusinessCategory | null;
   customerType: CustomerType | null;
   orderVolume: OrderVolume | null;
@@ -105,6 +149,8 @@ export interface TenantDocument {
   plan: "starter" | "business" | "enterprise";
   status: TenantStatus;
   onboarding: BusinessOnboarding;
+  appSetup: AppSetup | null;
+  subscription: Subscription | null;
   aiDashboardLayout: AiDashboardLayout | null;
   createdAt: Date;
   updatedAt: Date;
@@ -113,6 +159,12 @@ export interface TenantDocument {
 const onboardingSchema = new Schema<BusinessOnboarding>(
   {
     completed: { type: Boolean, default: false },
+    description: { type: String, trim: true, default: null },
+    roles: { type: [String], enum: ["retailer", "trader", "manufacturer"], default: [] },
+    sellsOnline: { type: [String], enum: ["website", "marketplace", "social"], default: [] },
+    onlineStoreUrl: { type: String, trim: true, default: null },
+    hasGst: { type: Boolean, default: null },
+    template: { type: String, default: null },
     category: {
       type: String,
       enum: [
@@ -178,6 +230,28 @@ const onboardingSchema = new Schema<BusinessOnboarding>(
   { _id: false }
 );
 
+const appSetupSchema = new Schema<AppSetup>(
+  {
+    template: { type: String, required: true },
+    defaultBillType: { type: String, enum: ["gst", "record"], default: "record" },
+    features: {
+      counterSale: { type: Boolean, default: true },
+      orders: { type: Boolean, default: true },
+      purchases: { type: Boolean, default: true },
+      warehouses: { type: Boolean, default: true },
+      rawMaterials: { type: Boolean, default: false },
+      batch: { type: Boolean, default: false },
+      serial: { type: Boolean, default: false },
+      variants: { type: Boolean, default: false },
+      staff: { type: Boolean, default: true },
+      creditLimits: { type: Boolean, default: true },
+      // No default on purpose: older setups leave it unset and follow counterSale.
+      cashbook: { type: Boolean },
+    },
+  },
+  { _id: false }
+);
+
 const aiDashboardLayoutSchema = new Schema<AiDashboardLayout>(
   {
     generatedAt: { type: Date, required: true },
@@ -191,6 +265,16 @@ const aiDashboardLayoutSchema = new Schema<AiDashboardLayout>(
       },
     ],
     quickActionLabels: { type: Schema.Types.Mixed, default: {} },
+  },
+  { _id: false }
+);
+
+const subscriptionSchema = new Schema<Subscription>(
+  {
+    plan: { type: String, enum: ["basic", "pro"], default: null },
+    period: { type: String, enum: ["monthly", "quarterly", "annual"], default: null },
+    trialEndsAt: { type: Date, default: null },
+    currentPeriodEnd: { type: Date, default: null },
   },
   { _id: false }
 );
@@ -215,6 +299,8 @@ const tenantSchema = new Schema<TenantDocument>(
     plan: { type: String, enum: ["starter", "business", "enterprise"], default: "starter" },
     status: { type: String, enum: ["trial", "active", "suspended"], default: "trial" },
     onboarding: { type: onboardingSchema, default: () => ({}) },
+    appSetup: { type: appSetupSchema, default: null },
+    subscription: { type: subscriptionSchema, default: null },
     aiDashboardLayout: { type: aiDashboardLayoutSchema, default: null },
   },
   { timestamps: true }

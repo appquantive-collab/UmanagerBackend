@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth, requireTenant } from "../../middleware/auth";
 import { askQuestionSchema, sendMessageSchema } from "./ai-chat.schemas";
+import { sendPlanError } from "../billing/subscription.service";
 import { AiChatNotConfiguredError, askBusinessQuestion, confirmAction, dismissAction, listMessages, sendMessage } from "./ai-chat.service";
 
 export const aiChatRouter = Router();
@@ -20,6 +21,7 @@ aiChatRouter.post("/messages", async (req, res) => {
     const result = await sendMessage(req.auth!.tenantId!, req.auth!.userId, parsed.data.content);
     res.status(201).json(result);
   } catch (err) {
+    if (sendPlanError(res, err)) return;
     if (err instanceof AiChatNotConfiguredError) {
       return res.status(503).json({ error: err.message });
     }
@@ -53,6 +55,7 @@ aiChatRouter.post("/ask", async (req, res) => {
     const answer = await askBusinessQuestion(req.auth!.tenantId!, parsed.data.question);
     res.json({ answer });
   } catch (err) {
+    if (sendPlanError(res, err)) return;
     if (err instanceof AiChatNotConfiguredError) return res.status(503).json({ error: err.message });
     console.error("[ai-chat] ask failed:", (err as Error).message);
     res.status(502).json({ error: "Munshi AI could not answer right now. Please try again." });

@@ -1,5 +1,6 @@
 import { env } from "../../config/env";
 import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
+import { assertAiTokens, recordAiTokens } from "../billing/subscription.service";
 
 export class AiNotConfiguredError extends Error {
   constructor() {
@@ -95,10 +96,11 @@ function parseAndValidate(raw: string, catalog: CatalogEntry[]): ParsedOrder {
   return { partyName, items };
 }
 
-export async function parseOrderText(text: string, catalog: CatalogEntry[]): Promise<ParsedOrder> {
+export async function parseOrderText(tenantId: string, text: string, catalog: CatalogEntry[]): Promise<ParsedOrder> {
   if (!env.groqApiKey) {
     throw new AiNotConfiguredError();
   }
+  await assertAiTokens(tenantId);
 
   const client = getGroqClient();
   const response = await client.chat.completions.create({
@@ -107,6 +109,7 @@ export async function parseOrderText(text: string, catalog: CatalogEntry[]): Pro
     messages: [{ role: "user", content: buildPrompt(text, catalog) }],
   });
 
+  await recordAiTokens(tenantId, response.usage);
   const raw = response.choices[0]?.message?.content;
   if (!raw) {
     throw new Error("AI returned an empty response");

@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { ipRateLimit } from "../../middleware/ipRateLimit";
@@ -45,8 +45,14 @@ const transcribeSchema = z.object({
 });
 
 const transcribeLimit = ipRateLimit({ perIp: 20, total: 300, message: "Too many voice messages. Please wait a minute." });
+// Live transcript while the mic is on: the clip-so-far is re-read every few
+// seconds, so it gets its own (larger) budget and never eats the final one.
+const liveTranscribeLimit = ipRateLimit({ perIp: 40, total: 600, message: "Too many voice messages. Please wait a minute." });
 
-munshiRouter.post("/transcribe", transcribeLimit, audioUpload.single("audio"), async (req, res) => {
+munshiRouter.post("/transcribe", transcribeLimit, audioUpload.single("audio"), transcribeHandler);
+munshiRouter.post("/transcribe/live", liveTranscribeLimit, audioUpload.single("audio"), transcribeHandler);
+
+async function transcribeHandler(req: Request, res: Response) {
   const parsed = transcribeSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   if (!req.file || req.file.size === 0) return res.status(400).json({ error: "No audio received." });
@@ -61,4 +67,4 @@ munshiRouter.post("/transcribe", transcribeLimit, audioUpload.single("audio"), a
     }
     throw err;
   }
-});
+}

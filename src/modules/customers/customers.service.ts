@@ -51,7 +51,10 @@ export async function listCustomersWithStats(tenantId: string, search?: string):
       phone: c.phone,
       creditLimit: c.creditLimit,
       isActive: c.isActive,
+      kind: c.kind,
+      email: c.email,
       gstin: c.gstin,
+      aadhaarLast4: c.aadhaarLast4,
       address: c.address,
       stateCode: c.stateCode,
       isWalkIn: c.isWalkIn,
@@ -70,7 +73,10 @@ export interface CustomerPortfolio {
     phone?: string;
     creditLimit: number;
     isActive: boolean;
+    kind?: "person" | "business";
+    email?: string;
     gstin?: string;
+    aadhaarLast4?: string;
     address?: string;
     stateCode?: string;
     isWalkIn?: boolean;
@@ -149,7 +155,10 @@ export async function getCustomerPortfolio(tenantId: string, customerId: string)
       phone: customer.phone,
       creditLimit: customer.creditLimit,
       isActive: customer.isActive,
+      kind: customer.kind,
+      email: customer.email,
       gstin: customer.gstin,
+      aadhaarLast4: customer.aadhaarLast4,
       address: customer.address,
       stateCode: customer.stateCode,
       isWalkIn: customer.isWalkIn,

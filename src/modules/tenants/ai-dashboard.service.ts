@@ -1,5 +1,6 @@
 import { env } from "../../config/env";
 import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
+import { assertAiTokens, recordAiTokens } from "../billing/subscription.service";
 import type { BusinessOnboarding } from "../../models/Tenant";
 
 // The only dashboard sections/actions the model is allowed to reorder or relabel.
@@ -16,7 +17,7 @@ const DASHBOARD_SECTIONS = [
   { key: "recent_activity", defaultLabel: "Recent Activity" },
 ] as const;
 
-const QUICK_ACTION_KEYS = ["new_order", "new_sale", "voice_order", "scan_stock"] as const;
+const QUICK_ACTION_KEYS = ["new_order", "new_sale", "voice_order", "gst_bill"] as const;
 
 export interface GeneratedDashboardLayout {
   welcomeMessage: string;
@@ -38,7 +39,10 @@ function buildPrompt(businessName: string, onboarding: BusinessOnboarding): stri
   return `You are personalizing a wholesale/inventory management dashboard for a business.
 
 Business name: ${businessName}
+In their own words: ${onboarding.description ?? "(not given)"}
 Category: ${onboarding.category}
+They work as: ${(onboarding.roles ?? []).join(", ") || "retailer"}
+Sells online: ${(onboarding.sellsOnline ?? []).join(", ") || "no"}
 Customer type: ${onboarding.customerType}
 Monthly order volume: ${onboarding.orderVolume}
 Warehouses: ${onboarding.warehouseCount}
@@ -113,12 +117,14 @@ function parseAndValidate(raw: string): GeneratedDashboardLayout {
 }
 
 export async function generateDashboardLayout(
+  tenantId: string,
   businessName: string,
   onboarding: BusinessOnboarding
 ): Promise<GeneratedDashboardLayout> {
   if (!env.groqApiKey) {
     throw new AiNotConfiguredError();
   }
+  await assertAiTokens(tenantId);
 
   const client = getGroqClient();
   const response = await client.chat.completions.create({
@@ -127,6 +133,7 @@ export async function generateDashboardLayout(
     messages: [{ role: "user", content: buildPrompt(businessName, onboarding) }],
   });
 
+  await recordAiTokens(tenantId, response.usage);
   const text = response.choices[0]?.message?.content;
   if (!text) {
     throw new Error("AI returned an empty response");

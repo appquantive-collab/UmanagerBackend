@@ -2,9 +2,11 @@ import { Router } from "express";
 import { requireAuth, requireRole, requireTenant } from "../../middleware/auth";
 import { Tenant } from "../../models/Tenant";
 import { recordAudit } from "../audit/audit.service";
-import { businessProfileSchema, onboardingSchema } from "./tenants.schemas";
-import { personalizeDashboard, saveOnboarding } from "./tenants.service";
+import { appSetupUpdateSchema, businessProfileSchema, onboardingSchema, understandSchema } from "./tenants.schemas";
+import { understandBusiness } from "./understand.service";
+import { personalizeDashboard, saveOnboarding, updateAppSetup } from "./tenants.service";
 import { AiNotConfiguredError } from "./ai-dashboard.service";
+import { sendPlanError } from "../billing/subscription.service";
 
 export const tenantsRouter = Router();
 
@@ -27,6 +29,7 @@ tenantsRouter.post("/personalize-dashboard", requireAuth, requireTenant, async (
     const aiDashboardLayout = await personalizeDashboard(req.auth!.tenantId!);
     return res.json({ aiDashboardLayout });
   } catch (err) {
+    if (sendPlanError(res, err)) return;
     if (err instanceof AiNotConfiguredError) {
       return res.status(503).json({ error: err.message });
     }
@@ -67,4 +70,23 @@ tenantsRouter.patch("/profile", requireAuth, requireTenant, requireRole("OWNER",
     bankIfsc: tenant.bankIfsc,
     invoiceTerms: tenant.invoiceTerms,
   });
+});
+
+// Setup step 1: "Aap kya kaam karte hain?" → category, roles and trade needs.
+tenantsRouter.post("/onboarding/understand", requireAuth, requireTenant, async (req, res) => {
+  const parsed = understandSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  return res.json(await understandBusiness(parsed.data.text, parsed.data.language));
+});
+
+tenantsRouter.patch("/setup", requireAuth, requireTenant, requireRole("OWNER", "MANAGER", "SUPER_ADMIN"), async (req, res) => {
+  const parsed = appSetupUpdateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const appSetup = await updateAppSetup(req.auth!.tenantId!, parsed.data);
+    void recordAudit(req, "settings.setup", `Changed app setup: ${JSON.stringify(parsed.data)}`);
+    return res.json({ appSetup });
+  } catch (err) {
+    return res.status(404).json({ error: (err as Error).message });
+  }
 });
