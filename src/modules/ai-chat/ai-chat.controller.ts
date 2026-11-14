@@ -18,7 +18,7 @@ aiChatRouter.post("/messages", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   try {
-    const result = await sendMessage(req.auth!.tenantId!, req.auth!.userId, parsed.data.content);
+    const result = await sendMessage(req.auth!.tenantId!, req.auth!.userId, parsed.data.content, parsed.data.language);
     res.status(201).json(result);
   } catch (err) {
     if (sendPlanError(res, err)) return;
@@ -52,7 +52,7 @@ aiChatRouter.post("/ask", async (req, res) => {
   const parsed = askQuestionSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   try {
-    const answer = await askBusinessQuestion(req.auth!.tenantId!, parsed.data.question);
+    const answer = await askBusinessQuestion(req.auth!.tenantId!, parsed.data.question, parsed.data.language);
     res.json({ answer });
   } catch (err) {
     if (sendPlanError(res, err)) return;

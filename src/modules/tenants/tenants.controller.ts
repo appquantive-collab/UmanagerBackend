@@ -4,6 +4,7 @@ import { Tenant } from "../../models/Tenant";
 import { recordAudit } from "../audit/audit.service";
 import { appSetupUpdateSchema, businessProfileSchema, onboardingSchema, understandSchema } from "./tenants.schemas";
 import { understandBusiness } from "./understand.service";
+import { planSetups, planSetupsSchema } from "./setup-planner.service";
 import { personalizeDashboard, saveOnboarding, updateAppSetup } from "./tenants.service";
 import { AiNotConfiguredError } from "./ai-dashboard.service";
 import { sendPlanError } from "../billing/subscription.service";
@@ -77,6 +78,13 @@ tenantsRouter.post("/onboarding/understand", requireAuth, requireTenant, async (
   const parsed = understandSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   return res.json(await understandBusiness(parsed.data.text, parsed.data.language));
+});
+
+// Setup last step: setups written by Munshi AI for this business ({ setups: null } → app shows its fixed ones).
+tenantsRouter.post("/onboarding/plan", requireAuth, requireTenant, async (req, res) => {
+  const parsed = planSetupsSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  return res.json({ setups: await planSetups(parsed.data) });
 });
 
 tenantsRouter.patch("/setup", requireAuth, requireTenant, requireRole("OWNER", "MANAGER", "SUPER_ADMIN"), async (req, res) => {

@@ -73,7 +73,7 @@ export const onboardingSchema = z.object({
     .max(6),
   description: z.string().trim().max(500).optional(),
   roles: z.array(z.enum(["retailer", "trader", "manufacturer"])).max(3).default([]),
-  sellsOnline: z.array(z.enum(["website", "marketplace", "social"])).max(3).default([]),
+  sellsOnline: z.array(z.enum(["website", "marketplace", "social", "phone"])).max(4).default([]),
   onlineStoreUrl: z.string().trim().max(200).optional(),
   hasGst: z.boolean().nullable().optional(),
   gstin: z

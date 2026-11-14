@@ -20,11 +20,23 @@ export class AiChatNotConfiguredError extends Error {
   }
 }
 
-// The model sometimes answered Roman-letter Hinglish in Devanagari; state the script explicitly.
-function scriptHint(message: string): string {
-  return /[\u0900-\u097F]/.test(message)
-    ? "The user wrote in Devanagari: reply in everyday Hindi written in Devanagari."
-    : "The user wrote in Roman (Latin) letters: reply ONLY in Roman letters — Hinglish if they used Hindi words, English if they wrote English. Do not use Devanagari.";
+export type ReplyLanguage = "en" | "hi" | "hi-Latn";
+
+const HINGLISH_RULE =
+  'Reply ONLY in Hinglish: everyday Hindi written in Roman letters, every sentence of it — e.g. "Khartaal Wooden ka stock khatam ho gaya hai, jaldi mangwa lijiye." Use English only for business words people say anyway (stock, bill, GST, order, purchase, supplier). Never write full English sentences, even if earlier replies in this chat or the data are in English. Do not use Devanagari.';
+
+/**
+ * Which language to reply in, sent last so it wins over the chat history. The
+ * app's language setting decides (an owner on Hinglish wants Hinglish even when
+ * earlier replies drifted into English); typing in Devanagari always gets Hindi.
+ */
+function languageRule(message: string, language?: ReplyLanguage): string {
+  if (/[ऀ-ॿ]/.test(message) || language === "hi") {
+    return "Reply in everyday spoken Hindi written in Devanagari (not formal or Sanskritized), every sentence of it, even if earlier replies were in another language.";
+  }
+  if (language === "hi-Latn") return HINGLISH_RULE;
+  // English app (or an old app version that sends no language): follow how they wrote.
+  return "The user wrote in Roman (Latin) letters: reply ONLY in Roman letters — Hinglish if they used Hindi words, simple English if they wrote English. Do not use Devanagari. Keep to one language for the whole reply.";
 }
 
 function escapeRegex(value: string): string {
@@ -41,13 +53,15 @@ const SYSTEM_PROMPT = `You are Munshi AI, the business assistant inside SethSath
 
 ## Language
 Reply in the same language AND script as the user's latest message. Hindi in Roman letters → Roman-script Hinglish. Devanagari → everyday spoken Hindi in Devanagari (not formal/Sanskritized). English → simple English. Keep business words people actually use (stock, bill, GST, udhaar, party).
+Stay in that one language for the whole reply: a Hinglish reply must never switch to full English sentences (say "Agar kisi par udhaar hua to Customers → Khata mein dikhega", not "If a customer starts owing, you can check…"). Replies are often read aloud, so write the way a person speaks.
 
 ## Answering business questions
 - A JSON snapshot of the business's real data is provided every turn: sales (today, yesterday, last 7 days, this/last month, top products), profit estimate, GST this month, purchases, dues, every product with live stock/prices/reorder level, warehouses, customers and suppliers with balances, recent bills and purchases, pending orders and staff with today's attendance.
 - Answer ANY question about the business from it: totals, comparisons ("this month vs last month"), a product's stock or price, who owes the most, which items to reorder, best sellers, a customer's or supplier's balance, a bill's status, GST payable, profit, staff present today, etc. Work things out (sums, differences, percentages, averages) when the data allows.
 - Never invent numbers, names or dates that are not in the snapshot or derivable from it. If something isn't in the data, say so plainly and tell them where in the app to look or how to record it.
 - If a value is 0 or a list is empty, say so clearly and suggest the next step (e.g. "No stock recorded yet — record a purchase or use Stock in/out in Inventory").
-- Lead with the answer (the number or name), then at most 2–3 short supporting lines. Use **bold** for key figures and short "- " bullet lists when listing items. No tables, no headings. Amounts in ₹ with Indian digit grouping (₹1,25,000).
+- Tone: calm, warm and respectful, like a trusted munshi talking to the owner across the counter. Start with one short, natural sentence that answers (e.g. "6 cheezein khatam ho gayi hain, inhe jaldi mangwa lijiye."), not a cold heading like "Reorder karne ke liye sabhi items:". Show a little care where it fits ("chinta mat kijiye", "achhi baat hai"), never over the top.
+- Then at most 2–3 short supporting lines. Use **bold** for key figures and short "- " bullet lists when listing items; list at most the 5 most important and say how many more there are. No tables, no headings. Amounts in ₹ with Indian digit grouping (₹1,25,000). Say negative stock plainly ("stock minus mein hai — bina stock ke bill bane hain").
 - You may give short, practical business advice when asked (pricing, reorder timing, collecting udhaar, slow-moving stock, GST basics), grounded in their data. For legal or tax filing, add that they should confirm with their CA.
 - If the question has nothing to do with business or SethSathi, politely say you help with their business and the app, and offer an example question.
 
@@ -122,7 +136,7 @@ export async function listMessages(tenantId: string) {
   return AiChatMessage.find({ tenantId }).sort({ createdAt: 1 }).limit(100);
 }
 
-export async function sendMessage(tenantId: string, userId: string, content: string): Promise<SendMessageResult> {
+export async function sendMessage(tenantId: string, userId: string, content: string, language?: ReplyLanguage): Promise<SendMessageResult> {
   if (!env.groqApiKey) {
     throw new AiChatNotConfiguredError();
   }
@@ -146,7 +160,7 @@ export async function sendMessage(tenantId: string, userId: string, content: str
         .reverse()
         .slice(0, -1) // the just-created user message is appended explicitly below
         .map((m) => ({ role: m.role, content: m.content })),
-      { role: "system", content: scriptHint(content) },
+      { role: "system", content: languageRule(content, language) },
       { role: "user", content },
     ],
   });
@@ -273,7 +287,7 @@ export async function dismissAction(tenantId: string, messageId: string) {
  * AI search: a one-off question answered from the business snapshot. Not saved
  * to the Munshi AI chat history and never proposes actions — just a short answer.
  */
-export async function askBusinessQuestion(tenantId: string, question: string): Promise<string> {
+export async function askBusinessQuestion(tenantId: string, question: string, language?: ReplyLanguage): Promise<string> {
   if (!env.groqApiKey) {
     throw new AiChatNotConfiguredError();
   }
@@ -294,7 +308,7 @@ export async function askBusinessQuestion(tenantId: string, question: string): P
           "This is a quick search, not a chat: answer in 1 to 3 short sentences (or a very short list), lead with the number or name asked for, no markdown headings. Do not offer to create orders or mark attendance here.",
       },
       { role: "system", content: `Today's date: ${today}. Business data snapshot (JSON): ${context}` },
-      { role: "system", content: scriptHint(question) },
+      { role: "system", content: languageRule(question, language) },
       { role: "user", content: question },
     ],
   });

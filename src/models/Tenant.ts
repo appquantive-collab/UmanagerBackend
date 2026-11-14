@@ -73,7 +73,7 @@ export type BusinessGoal =
   | "reporting";
 
 export type BusinessRole = "retailer" | "trader" | "manufacturer";
-export type OnlineChannel = "website" | "marketplace" | "social";
+export type OnlineChannel = "website" | "marketplace" | "social" | "phone";
 
 /** Which parts of the app this business uses — set by the setup template, changeable in Settings. */
 export interface AppFeatures {
@@ -161,7 +161,7 @@ const onboardingSchema = new Schema<BusinessOnboarding>(
     completed: { type: Boolean, default: false },
     description: { type: String, trim: true, default: null },
     roles: { type: [String], enum: ["retailer", "trader", "manufacturer"], default: [] },
-    sellsOnline: { type: [String], enum: ["website", "marketplace", "social"], default: [] },
+    sellsOnline: { type: [String], enum: ["website", "marketplace", "social", "phone"], default: [] },
     onlineStoreUrl: { type: String, trim: true, default: null },
     hasGst: { type: Boolean, default: null },
     template: { type: String, default: null },

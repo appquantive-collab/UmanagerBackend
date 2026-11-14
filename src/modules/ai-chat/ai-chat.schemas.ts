@@ -2,6 +2,8 @@ import { z } from "zod";
 
 export const sendMessageSchema = z.object({
   content: z.string().min(1).max(1000),
+  /** The app's language: Munshi AI replies in it. */
+  language: z.enum(["en", "hi", "hi-Latn"]).optional(),
 });
 
 export const markAttendanceActionSchema = z.object({
@@ -26,4 +28,5 @@ export const createOrderActionSchema = z.object({
 
 export const askQuestionSchema = z.object({
   question: z.string().trim().min(1).max(500),
+  language: z.enum(["en", "hi", "hi-Latn"]).optional(),
 });
