@@ -306,7 +306,13 @@ export async function planSteps(tenantId: string, calls: ToolCallLike[]): Promis
     if (!(STEP_TYPES as readonly string[]).includes(call.name)) continue;
     const type = call.name as StepType;
     const parsed = stepSchemas[type].safeParse(args);
-    if (parsed.success) proposed.push({ type, payload: parsed.data as Record<string, unknown> });
+    if (!parsed.success) continue;
+    // Don't offer to add what's already saved (e.g. the item a step just created).
+    const name = String((parsed.data as { name?: unknown }).name ?? "");
+    if (type === "create_product" && (await findProduct(tenantId, name))) continue;
+    if (type === "create_customer" && (await findCustomer(tenantId, name))) continue;
+    if (type === "create_supplier" && (await findSupplier(tenantId, name))) continue;
+    proposed.push({ type, payload: parsed.data as Record<string, unknown> });
   }
 
   // Who and what this plan already adds, so the same party/item isn't added twice.
@@ -548,7 +554,28 @@ export async function runStep(
 /** One line per step for the chat history, so Munshi knows what's done and what's waiting. */
 export function stepsForHistory(steps: WorkflowStep[] | undefined): string {
   if (!steps?.length) return "";
-  return `\n[Steps: ${steps
-    .map((s, i) => `${i + 1}. ${s.type} ${JSON.stringify(s.payload)} → ${s.status}${s.resultSummary ? ` (${s.resultSummary})` : ""}`)
-    .join("; ")}]`;
+  const state = (s: WorkflowStep) =>
+    s.status === "confirmed"
+      ? `DONE and saved by the user${s.resultSummary ? ` (${s.resultSummary})` : ""}; nothing more to confirm`
+      : s.status === "dismissed"
+        ? s.replaced
+          ? "replaced by a later list"
+          : "skipped by the user"
+        : "still waiting for the user to confirm";
+  return `\n[What happened to these steps: ${steps.map((s, i) => `${i + 1}. ${s.type} ${JSON.stringify(s.payload)}: ${state(s)}`).join("; ")}]`;
+}
+
+/**
+ * Identity of a job, to spot the same bill / purchase / order proposed again:
+ * type + party + items (name, quantity, unit, price), with names normalised
+ * ("Ravi ji" = "ravi"). Steps that only add a party or item use their name.
+ */
+export function stepSignature(type: string, payload: Record<string, unknown>): string {
+  const p = payload as { name?: string; customerName?: string; supplierName?: string; items?: { productName: string; quantity: number; unit?: string; price?: number }[]; staffName?: string; date?: string };
+  const items = (p.items ?? [])
+    .map((i) => `${normalizeName(i.productName)}:${Number(i.quantity)}:${(i.unit ?? "").toLowerCase()}:${i.price ?? ""}`)
+    .sort()
+    .join(",");
+  const party = normalizeName(p.customerName ?? p.supplierName ?? p.name ?? p.staffName ?? "");
+  return `${type}|${party}|${items}|${p.date ?? ""}`;
 }

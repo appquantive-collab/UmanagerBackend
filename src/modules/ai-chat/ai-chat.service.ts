@@ -9,7 +9,7 @@ import { buildFullBusinessContext } from "./business-context";
 import { Tenant } from "../../models/Tenant";
 import { tradeLine } from "../tenants/trade.service";
 import type { UserRole } from "../../models/User";
-import { StepError, planSteps, runStep, stepsForHistory, workflowTools } from "./workflow";
+import { StepError, planSteps, runStep, stepSignature, stepsForHistory, workflowTools } from "./workflow";
 import { markAttendance } from "../attendance/attendance.service";
 import { saveOrder } from "../orders/orders.service";
 import {
@@ -99,7 +99,8 @@ When the user asks you to DO something that changes data, call tools to propose 
 - Quantity and rate in different units ("2 kilo kapda bech do, 50 rupaye per meter"): never put a per-meter rate on kilos. If the business data gives the conversion (e.g. "1 kg ≈ 7 meter"), convert the quantity to the rate's unit (2 kg ≈ 14 meter @ ₹50) and say in your text that you converted it so they can correct it; otherwise call ask_user ("2 kilo mein kitne meter hue?") and propose only the other steps.
 - If the user corrects or adds to steps still waiting ("nahi, 10 kg tha", "inka naam Rajesh hai, mobile 99999 94422"), call propose_steps again with the full corrected list of the waiting steps; it replaces the old list. Never answer a correction in plain text.
 - Keep your text short: one line saying what you've prepared (e.g. "Teen kaam taiyaar hain — ek-ek karke confirm kijiye."). Don't repeat every detail; the steps show them. Never write step or tool names (create_supplier, record_purchase…) in your text.
-- Never call a tool for something the user only asked about.`;
+- Never call a tool for something the user only asked about.
+- Steps shown in the history as "→ confirmed" are DONE and saved (the summary has the bill / purchase number). Never propose them again, and never ask the user to confirm them again. If the user asks why something is repeating or says it's already done, agree it's done, name what was made (e.g. "Ravi ji ka bill INV-0003 ban chuka hai"), apologise briefly, and stop; propose nothing.`;
 
 export interface SendMessageResult {
   userMessage: HydratedDocument<AiChatMessageDocument>;
@@ -130,10 +131,25 @@ export async function sendMessage(
 
   // "Haan / aage badho / theek hai" or "nahi / chhodo" while a step is open: do or skip
   // that step right here (by voice or text), no AI call needed.
-  const intent = waiting ? quickIntent(content) : null;
+  const intent = quickIntent(content);
   if (waiting && intent) {
     const userMessage = await AiChatMessage.create({ tenantId, role: "user", content, createdBy: userId });
     return answerOpenStep(tenantId, userId, role, waiting, intent, userMessage, language ?? "hi-Latn");
+  }
+  // Just "haan / theek hai / sahi h / ok" right after a list that's all done: a short
+  // reply, no AI (asking the AI made it re-propose the steps already done). After a
+  // question or a normal answer, "haan" still goes to Munshi, who needs it.
+  const lastReply = intent ? await AiChatMessage.findOne({ tenantId, role: "assistant" }).sort({ createdAt: -1 }).lean() : null;
+  const lastListDone = Boolean(lastReply?.steps?.length && lastReply.steps.every((s) => s.status !== "pending") && !lastReply.quickReplies?.length);
+  if (intent && lastListDone) {
+    const userMessage = await AiChatMessage.create({ tenantId, role: "user", content, createdBy: userId });
+    const lang = language ?? "hi-Latn";
+    const ack =
+      intent === "yes"
+        ? { "hi-Latn": "Theek hai ji 👍 Aur kuch karna ho to batayein.", hi: "ठीक है जी 👍 और कुछ करना हो तो बताइए।", en: "Okay 👍 Tell me if there's anything else." }[lang]
+        : { "hi-Latn": "Theek hai, kuch nahi kiya. Aur kuch?", hi: "ठीक है, कुछ नहीं किया। और कुछ?", en: "Okay, nothing done. Anything else?" }[lang];
+    const assistantMessage = await AiChatMessage.create({ tenantId, role: "assistant", content: ack, createdBy: userId });
+    return { userMessage, assistantMessage };
   }
 
   await assertAiTokens(tenantId);
@@ -194,6 +210,27 @@ export async function sendMessage(
     .map((c) => ({ name: c.function.name, arguments: c.function.arguments }));
   const { steps, question } = calls.length ? await planSteps(tenantId, calls) : { steps: [], question: undefined };
 
+  // Never offer again a job already done in this chat (a bill, purchase or order with the
+  // same party and items), unless the person clearly asks for it again.
+  const alreadyDone: string[] = [];
+  if (steps.length && !/\b(phir se|fir se|dobara|dubara|ek aur|aur ek|again|another|repeat)\b|फिर से|दोबारा|एक और/i.test(content)) {
+    const recent = await AiChatMessage.find({ tenantId, role: "assistant", "steps.status": "confirmed" }, { steps: 1 })
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .lean();
+    const done = new Map<string, string | undefined>();
+    for (const m of recent) for (const s of m.steps ?? []) if (s.status === "confirmed") done.set(stepSignature(s.type, s.payload), s.resultSummary);
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const sig = stepSignature(steps[i].type, steps[i].payload);
+      if (done.has(sig)) {
+        alreadyDone.unshift(done.get(sig) ?? steps[i].type);
+        steps.splice(i, 1);
+      }
+    }
+    // An "add Ravi first" step left on its own once its bill was dropped isn't wanted either.
+    if (steps.length && steps.every((s) => s.auto)) steps.length = 0;
+  }
+
   // A new list replaces the old one's waiting steps, so only one list is open at a time.
   // The same list again (the model re-sent it instead of moving on): keep the open one.
   const sameAsOpen =
@@ -221,8 +258,22 @@ export async function sendMessage(
   if (steps.length && wroteStepsAsText(assistantContent)) assistantContent = "";
   if (question) assistantContent = assistantContent ? `${assistantContent}\n\n${question.text}` : question.text;
   if (!assistantContent && steps.length) assistantContent = workflowIntro(steps.length, language ?? "hi-Latn");
+  const lang = language ?? "hi-Latn";
+  if (!steps.length && alreadyDone.length) {
+    // What the AI wrote was about the duplicate it proposed: say plainly it's already done.
+    const refs = alreadyDone.filter((r) => /\d/.test(r)).join(", ");
+    assistantContent = {
+      "hi-Latn": `Yeh kaam pehle hi ho chuka hai${refs ? ` (${refs})` : ""}, dobara nahi banaya. Phir se chahiye to "phir se banao" boliye.`,
+      hi: `यह काम पहले ही हो चुका है${refs ? ` (${refs})` : ""}, दोबारा नहीं बनाया। फिर से चाहिए तो "फिर से बनाओ" बोलिए।`,
+      en: `That's already done${refs ? ` (${refs})` : ""}, so I didn't make it again. Say "make it again" if you want another.`,
+    }[lang];
+  }
   if (!assistantContent) {
-    assistantContent = "Sorry, I couldn't come up with an answer. Could you rephrase that?";
+    assistantContent = {
+      "hi-Latn": "Maaf kijiye, yeh samajh nahi paya. Thoda alag tarah se batayenge?",
+      hi: "माफ़ कीजिए, यह समझ नहीं पाया। थोड़ा अलग तरह से बताएँगे?",
+      en: "Sorry, I couldn't come up with an answer. Could you rephrase that?",
+    }[lang];
   }
 
   const assistantMessage = await AiChatMessage.create({
@@ -245,14 +296,26 @@ const NO = /^(nahi|nahin|na|no|skip|chhodo|chhod do|chodo|rehne do|mat karo|canc
 export function quickIntent(text: string): "yes" | "no" | null {
   const words = text
     .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\s]+/gu, " ")
     .replace(/[.,!?।"'\x60]+/g, " ")
     .split(/\s+/)
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((w) => (w === "h" || w === "he" || w === "hain" ? "hai" : w));
   if (words.length === 0 || words.length > 6) return null;
   // Fillers around the answer ("theek hai bhai", "yes please") don't change it.
   const FILLER = new Set(["bhai", "bhaiya", "please", "plz", "to", "toh", "abhi", "ab", "phir", "sir", "भाई", "अब"]);
   const core = words.filter((w) => !FILLER.has(w));
   const t = (core.length ? core : words).join(" ");
+  // "Haan kariye fatafat", "theek hai bana do", "ji jaldi karo": a yes word first, then only
+  // words that push it along (no numbers or changes, those go to Munshi).
+  const LEAD_YES = new Set(["haan", "han", "ha", "haa", "haanji", "ji", "ok", "okay", "theek", "thik", "sahi", "yes", "हाँ", "हां", "ठीक", "जी"]);
+  const PUSH_ON = new Set([
+    "hai", "ji", "kariye", "kijiye", "karo", "kar", "karein", "karen", "do", "dijiye", "de", "dena", "jaldi", "fatafat", "please", "abhi", "ab",
+    "chalo", "aage", "badho", "banao", "bana", "banaiye", "banado", "confirm", "theek", "thik", "sahi", "ok", "haan", "bilkul",
+    "करो", "कर", "दो", "दीजिए", "करिए", "करें", "जल्दी", "फटाफट", "बनाओ", "बनाइए", "है", "जी", "हाँ",
+  ]);
+  const said = core.length ? core : words;
+  if (LEAD_YES.has(said[0]) && said.slice(1).every((w) => PUSH_ON.has(w))) return "yes";
   if (YES.test(t)) return "yes";
   if (NO.test(t)) return "no";
   // "theek hai aage badho", "haan kar do": every part is a yes phrase.
