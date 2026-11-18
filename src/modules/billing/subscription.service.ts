@@ -1,3 +1,5 @@
+import { logAiCall } from "./ai-cost.service";
+import type { AiKind } from "../../models/AiCall";
 import type { Response } from "express";
 import { Types } from "mongoose";
 import { Tenant, type BillingPeriod, type PlanKey, type Subscription } from "../../models/Tenant";
@@ -49,7 +51,7 @@ export function planState(sub: Subscription | null, now = new Date()): PlanState
       isPro: PLANS[sub.plan].proFeatures,
       endsAt: sub.currentPeriodEnd,
       daysLeft: daysUntil(sub.currentPeriodEnd),
-      aiTokenLimit: PLANS[sub.plan].aiTokensPerMonth,
+      aiTokenLimit: sub.aiTokenLimit ?? PLANS[sub.plan].aiTokensPerMonth,
     };
   }
   if (!sub?.plan && sub?.trialEndsAt && sub.trialEndsAt > now) {
@@ -60,7 +62,7 @@ export function planState(sub: Subscription | null, now = new Date()): PlanState
       isPro: PLANS[TRIAL_PLAN].proFeatures,
       endsAt: sub.trialEndsAt,
       daysLeft: daysUntil(sub.trialEndsAt),
-      aiTokenLimit: PLANS[TRIAL_PLAN].aiTokensPerMonth,
+      aiTokenLimit: sub.aiTokenLimit ?? PLANS[TRIAL_PLAN].aiTokensPerMonth,
     };
   }
   return {
@@ -179,7 +181,13 @@ export async function assertAiTokens(tenantId: string): Promise<void> {
 }
 
 /** After an AI call: add the tokens the model reports (prompt + answer). */
-export async function recordAiTokens(tenantId: string, usage: { total_tokens?: number } | null | undefined): Promise<void> {
+export async function recordAiTokens(
+  tenantId: string,
+  usage: (Parameters<typeof logAiCall>[0]["usage"] & { total_tokens?: number }) | null | undefined,
+  /** What the call was for and which model answered: written to the founder's cost report. */
+  meta?: { kind: AiKind; model: string }
+): Promise<void> {
+  if (meta) void logAiCall({ kind: meta.kind, model: meta.model, usage, tenantId });
   const tokens = Math.max(0, Math.round(usage?.total_tokens ?? 0));
   await AiUsage.updateOne(
     { tenantId: new Types.ObjectId(tenantId), month: usageMonth() },

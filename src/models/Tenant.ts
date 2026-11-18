@@ -12,6 +12,8 @@ export interface Subscription {
   trialEndsAt: Date | null;
   /** Paid access runs until this moment. */
   currentPeriodEnd: Date | null;
+  /** Munshi AI tokens a month for this business instead of the plan's (set by the VoiceMunshi team, e.g. for testing). */
+  aiTokenLimit?: number | null;
 }
 
 export type BusinessCategory =
@@ -113,7 +115,31 @@ export interface BusinessOnboarding {
   staffCount: number | null;
   painPoints: string | null;
   goals: BusinessGoal[];
+  /** How they buy and sell (cloth: buy by kg, sell by meter). Null until set up. */
+  trade?: TradeProfile | null;
   completedAt: Date | null;
+}
+
+export interface TradeProfile {
+  /** Main unit stock is bought in (first of buyUnits). */
+  buyUnit: string;
+  /** Main unit it's sold in (first of sellUnits). */
+  sellUnit: string;
+  /** Sell units in one buy unit, roughly (1 kg cloth ≈ 7 meter). Null when same unit or it varies. */
+  factor: number | null;
+  /** Every unit they buy in, main first: cloth can come by the thaan and by the kilo. */
+  buyUnits?: string[];
+  /** Every unit they sell in, main first: by the meter and as cut pieces. */
+  sellUnits?: string[];
+  /** Rough size of each buy unit in the main sell unit: 1 thaan ≈ 40 meter, 1 kg ≈ 7 meter. */
+  conversions?: TradeConversion[];
+  /** Anything else the owner said about how they buy/sell. */
+  notes: string | null;
+}
+
+export interface TradeConversion {
+  unit: string;
+  factor: number;
 }
 
 export interface DashboardLayoutSection {
@@ -225,6 +251,24 @@ const onboardingSchema = new Schema<BusinessOnboarding>(
       enum: ["inventory_tracking", "credit_payments", "multi_warehouse", "staff_management", "ai_insights", "reporting"],
       default: [],
     },
+    trade: {
+      type: new Schema<TradeProfile>(
+        {
+          buyUnit: { type: String, required: true, trim: true },
+          sellUnit: { type: String, required: true, trim: true },
+          factor: { type: Number, default: null },
+          buyUnits: { type: [String], default: undefined },
+          sellUnits: { type: [String], default: undefined },
+          conversions: {
+            type: [new Schema<TradeConversion>({ unit: { type: String, required: true }, factor: { type: Number, required: true } }, { _id: false })],
+            default: undefined,
+          },
+          notes: { type: String, trim: true, default: null },
+        },
+        { _id: false }
+      ),
+      default: null,
+    },
     completedAt: { type: Date, default: null },
   },
   { _id: false }
@@ -275,6 +319,7 @@ const subscriptionSchema = new Schema<Subscription>(
     period: { type: String, enum: ["monthly", "quarterly", "annual"], default: null },
     trialEndsAt: { type: Date, default: null },
     currentPeriodEnd: { type: Date, default: null },
+    aiTokenLimit: { type: Number, default: null },
   },
   { _id: false }
 );

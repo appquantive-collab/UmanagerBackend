@@ -133,7 +133,7 @@ export async function generateDashboardLayout(
     messages: [{ role: "user", content: buildPrompt(businessName, onboarding) }],
   });
 
-  await recordAiTokens(tenantId, response.usage);
+  await recordAiTokens(tenantId, response.usage, { kind: "dashboard", model: response.model });
   const text = response.choices[0]?.message?.content;
   if (!text) {
     throw new Error("AI returned an empty response");

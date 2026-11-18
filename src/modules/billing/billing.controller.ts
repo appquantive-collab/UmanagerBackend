@@ -2,10 +2,15 @@ import { Router, type Request } from "express";
 import { z } from "zod";
 import { env } from "../../config/env";
 import { requireAuth, requireRole, requireTenant } from "../../middleware/auth";
+import { isPlaceholderEmail } from "../auth/auth.service";
 import { Tenant } from "../../models/Tenant";
 import { User } from "../../models/User";
 import { AiUsage } from "../../models/AiUsage";
 import { SubscriptionPayment } from "../../models/SubscriptionPayment";
+import { getSttEngine, getTtsSettings, setSttEngine, setTtsSettings } from "../../models/PlatformSetting";
+import { SARVAM_VOICES, type SarvamVoiceKey, sarvamTtsAvailable } from "../tts/sarvam-tts.service";
+import { synthesize } from "../tts/tts.service";
+import { sarvamAvailable } from "../munshi/sarvam.service";
 import { priceFor, priceList } from "./plans";
 import { aiUsage, applyPurchase, getPlanState, planState, usageMonth } from "./subscription.service";
 import { createRazorpayOrder, razorpayConfigured, verifyPaymentSignature, verifyWebhookSignature } from "./razorpay";
@@ -78,8 +83,8 @@ billingRouter.post("/checkout", requireAuth, requireTenant, requireRole("OWNER",
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      businessName: tenant?.businessName ?? "SethSathi",
-      prefill: { name: user?.name ?? "", email: user?.email ?? "", contact: user?.phone ?? tenant?.phone ?? "" },
+      businessName: tenant?.businessName ?? "VoiceMunshi",
+      prefill: { name: user?.name ?? "", email: user?.email && !isPlaceholderEmail(user.email) ? user.email : "", contact: user?.phone ?? tenant?.phone ?? "" },
     });
   } catch (err) {
     console.error("[billing] checkout:", (err as Error).message);
@@ -144,12 +149,12 @@ billingRouter.post("/webhook", async (req: Request & { rawBody?: Buffer }, res) 
   res.json({ ok: true });
 });
 
-// ---------- SethSathi team (platform admins) ----------
+// ---------- VoiceMunshi team (platform admins) ----------
 
+/** The VoiceMunshi team: a PLATFORM_ADMIN login (no business), still active. */
 export async function isPlatformAdmin(userId: string): Promise<boolean> {
-  if (env.platformAdminEmails.length === 0) return false;
-  const user = await User.findById(userId, { email: 1 }).lean();
-  return Boolean(user?.email && env.platformAdminEmails.includes(user.email.toLowerCase()));
+  const user = await User.findById(userId, { role: 1, isActive: 1 }).lean();
+  return user?.role === "PLATFORM_ADMIN" && user.isActive;
 }
 
 const platformAdminOnly = [
@@ -226,4 +231,53 @@ billingRouter.post("/admin/grant", ...platformAdminOnly, async (req, res) => {
     paidAt: new Date(),
   });
   res.json({ state: await getPlanState(tenantId) });
+});
+
+// ---------- App-wide settings (super admin) ----------
+
+/** Speech-to-text engine for every business, plus whether Sarvam is ready. */
+async function settingsView() {
+  const tts = await getTtsSettings();
+  return {
+    sttEngine: await getSttEngine(),
+    sarvamConfigured: Boolean(env.sarvamApiKey),
+    sarvamAvailable: sarvamAvailable(),
+    ttsEngine: tts.engine,
+    ttsVoice: tts.voice,
+    sarvamVoiceAvailable: sarvamTtsAvailable(),
+    voices: Object.entries(SARVAM_VOICES).map(([key, v]) => ({ key, label: v.label, model: v.model })),
+  };
+}
+
+billingRouter.get("/admin/settings", ...platformAdminOnly, async (_req, res) => {
+  res.json(await settingsView());
+});
+
+billingRouter.patch("/admin/settings", ...platformAdminOnly, async (req, res) => {
+  const parsed = z
+    .object({
+      sttEngine: z.enum(["auto", "sarvam", "whisper"]).optional(),
+      ttsEngine: z.enum(["auto", "sarvam", "edge"]).optional(),
+      ttsVoice: z.enum(Object.keys(SARVAM_VOICES) as [SarvamVoiceKey, ...SarvamVoiceKey[]]).optional(),
+    })
+    .safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  if (parsed.data.sttEngine) await setSttEngine(parsed.data.sttEngine);
+  if (parsed.data.ttsEngine || parsed.data.ttsVoice) await setTtsSettings({ engine: parsed.data.ttsEngine, voice: parsed.data.ttsVoice });
+  res.json(await settingsView());
+});
+
+/** Hear a Sarvam voice before choosing it (costs a few characters of Sarvam credit). */
+billingRouter.post("/admin/voice-preview", ...platformAdminOnly, async (req, res) => {
+  const parsed = z
+    .object({ voice: z.enum(Object.keys(SARVAM_VOICES) as [SarvamVoiceKey, ...SarvamVoiceKey[]]), text: z.string().trim().min(1).max(300).optional() })
+    .safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const audio = await synthesize(parsed.data.text ?? "Namaste ji! Aaj ki bikri achhi rahi, chaudah hazaar paanch sau rupaye. Ravi ji par teen hazaar ka udhaar baaki hai, unhe yaad dila dijiye.", "hi-Latn", { voiceOverride: parsed.data.voice });
+    res.setHeader("Content-Type", audio.subarray(0, 4).toString("latin1") === "RIFF" ? "audio/wav" : "audio/mpeg");
+    res.send(audio);
+  } catch (err) {
+    res.status(503).json({ error: (err as Error).message });
+  }
 });

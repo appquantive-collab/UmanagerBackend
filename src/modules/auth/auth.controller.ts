@@ -55,6 +55,7 @@ authRouter.post("/login", async (req, res) => {
     const result = await login(parsed.data.email, parsed.data.password);
     return res.json(result);
   } catch (err) {
+    if (/suspended/i.test((err as Error).message)) return res.status(403).json({ error: (err as Error).message, code: "ACCOUNT_SUSPENDED" });
     return res.status(401).json({ error: (err as Error).message });
   }
 });
@@ -64,6 +65,9 @@ function sendOtpError(res: Response, err: unknown) {
     return res
       .status(err.status)
       .json({ error: err.message, code: err.code, retryAfterSeconds: err.retryAfterSeconds });
+  }
+  if (err instanceof Error && /suspended/i.test(err.message)) {
+    return res.status(403).json({ error: err.message, code: "ACCOUNT_SUSPENDED" });
   }
   console.error("[otp] unexpected error:", err);
   return res.status(500).json({ error: "Something went wrong. Please try again." });

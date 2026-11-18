@@ -1,3 +1,6 @@
+import { logAiCall } from "../billing/ai-cost.service";
+import { getTtsSettings } from "../../models/PlatformSetting";
+import { DEFAULT_SARVAM_VOICE, SARVAM_VOICES, type SarvamVoiceKey, sarvamSpeak, sarvamTtsAvailable } from "./sarvam-tts.service";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import { env } from "../../config/env";
 import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
@@ -27,20 +30,20 @@ const VOICES: Record<TtsLanguage, { name: string; rate: string }> = {
 const SCRIPT_CACHE_MAX = 500;
 const scriptCache = new Map<string, string>();
 
-const DEVANAGARI_PROMPT = `You are Munshi, a calm, warm assistant at an Indian shop. You get a reply that was written for the screen (Hinglish or Hindi, maybe with lists) and turn it into what you would SAY out loud to the shop owner, in everyday spoken Hindi written in Devanagari, for a Hindi text-to-speech voice.
+const DEVANAGARI_PROMPT = `You prepare text for a Hindi text-to-speech voice. You get a reply exactly as it is shown on the screen (Hinglish in Roman letters, or Hindi). Write the SAME words, in the SAME order, in Devanagari script, so the voice reads out exactly what the person sees.
 Rules:
-- Keep names and the numbers that matter correct, and never add facts, advice or greetings. You may leave out minor details and summarise a list the way a person would (the full text is on the screen).
-- Sound like a person talking calmly and kindly, not reading a list or a table. Group items that share a status and say the status once ("डमरू 88, जेयर और खड़ताल का स्टॉक खत्म हो गया है, और तबला हैंडल भी कम है।"). Never repeat the same words after every item. Leave out details a person wouldn't say aloud (like reorder levels) unless they are the point. Use commas and full stops for natural pauses. No headings, dashes, symbols, brackets or bullet marks.
-- If a list has more than 5 items, say the 5 most important, then say how many more there are and that the full list is on the screen.
-- Hindi words written in Roman letters are Hindi: spell them in proper Hindi (Tabla → तबला, Damru → डमरू, Khartaal → खड़ताल, Dholak → ढोलक).
-- Write English words in Devanagari the way Indians say them (order → ऑर्डर, bill → बिल, stock → स्टॉक, Google → गूगल). SethSathi → सेठसाथी, Munshi → मुंशी, AI → एआई, GST → जीएसटी.
-- Negative numbers are said with "माइनस" (stock -22 → स्टॉक माइनस 22). Keep digits and ₹ amounts as digits.
-- Keep it short and simple, the way you'd say it across the counter.
-- Reply with only the words to speak.
+- Do not rephrase, summarise, shorten, reorder, add or drop anything. Every word, name, number and item on the screen must be spoken, in the same order. This is transliteration, not rewriting.
+- Hinglish words in Roman letters: spell them in proper Hindi (kya → क्या, apply karna hai → अप्लाई करना है, Tabla → तबला, Damru → डमरू).
+- English words: write them in Devanagari the way Indians say them (bill → बिल, rate → रेट, percentage → परसेंटेज, stock → स्टॉक, order → ऑर्डर). GST → जीएसटी, AI → एआई, Munshi → मुंशी, VoiceMunshi → वॉइसमुंशी.
+- Only change what a voice cannot read: drop markdown (**, bullets, list numbers, headings) and bracket marks but keep the words inside them; turn a list into sentences separated by commas or full stops, keeping every item.
+- Symbols said as words: ₹500 → 500 रुपये, 18% → 18 प्रतिशत, - before a number → माइनस, & → और, / between words → या. Keep digits as digits.
+- Reply with only the text to speak.
 
-Example
-Screen: "Ye items kam hain:. Tabla Handle – stock 20 (low). Damru 88 – stock -1 (out of stock). Jeyar – stock -22 (out of stock)."
-Spoken: "डमरू 88 और जेयर का स्टॉक खत्म हो गया है, बल्कि माइनस में चला गया है। और तबला हैंडल भी अब कम बचा है।"`;
+Examples
+Screen: "Ravi ji ke bill ke liye GST rate kya apply karna hai? (percentage me)"
+Spoken: "रवि जी के बिल के लिए जीएसटी रेट क्या अप्लाई करना है? परसेंटेज में।"
+Screen: "Aaj ki bikri **₹15,316** hui hai. Sabse zyada udhaar **Gupta General Store** par hai."
+Spoken: "आज की बिक्री 15,316 रुपये हुई है। सबसे ज़्यादा उधार गुप्ता जनरल स्टोर पर है।"`;
 
 export async function toDevanagari(text: string): Promise<string | null> {
   const cached = scriptCache.get(text);
@@ -50,13 +53,14 @@ export async function toDevanagari(text: string): Promise<string | null> {
     const response = await getGroqClient().chat.completions.create({
       model: GROQ_CHAT_MODEL,
       reasoning_effort: "low",
-      temperature: 0.3,
-      max_completion_tokens: 800,
+      temperature: 0.1,
+      max_completion_tokens: 1200,
       messages: [
         { role: "system", content: DEVANAGARI_PROMPT },
         { role: "user", content: text },
       ],
     }, { timeout: 6000, maxRetries: 0 });
+    void logAiCall({ kind: "tts", model: response.model ?? "openai/gpt-oss-120b", usage: response.usage });
     const converted = response.choices[0]?.message?.content?.trim();
     // Must be mostly Devanagari, and not wildly longer/shorter than the input.
     if (!converted || !/[ऀ-ॿ]/.test(converted) || converted.length > text.length * 2 + 20) return null;
@@ -177,15 +181,41 @@ function speakable(text: string): string {
     .trim();
 }
 
-export async function synthesize(input: string, language: TtsLanguage): Promise<Buffer> {
+export async function synthesize(input: string, language: TtsLanguage, options: { voiceOverride?: SarvamVoiceKey } = {}): Promise<Buffer> {
   let voice = VOICES[language];
   let text = speakable(input);
+  let spokenHindi = false;
   if (language === "hi-Latn" || language === "hi") {
     // Calm spoken Hindi for the Hindi voice (lists become sentences, symbols go).
     const spoken = await toDevanagari(text);
-    if (spoken) text = spoken;
+    if (spoken) {
+      text = spoken;
+      spokenHindi = true;
+    }
     // Couldn't convert Hinglish: the English voice still reads Latin letters better than the Hindi one.
     else if (language === "hi-Latn") voice = ENGLISH_VOICE;
+  }
+
+  // Hindi / Hinglish: Sarvam's natural Indian male voice first (Admin → Settings picks it);
+  // the Microsoft voice below is the backup. Sarvam needs the Devanagari text.
+  const tts = await getTtsSettings();
+  const useSarvam = spokenHindi && (options.voiceOverride !== undefined || tts.engine === "sarvam" || (tts.engine === "auto" && sarvamTtsAvailable()));
+  if (useSarvam) {
+    const voiceKey = (options.voiceOverride ?? (tts.voice in SARVAM_VOICES ? tts.voice : DEFAULT_SARVAM_VOICE)) as SarvamVoiceKey;
+    const sarvamKey = `sarvam|${voiceKey}|${text}`;
+    const hit = cache.get(sarvamKey);
+    if (hit) {
+      remember(sarvamKey, hit);
+      return hit;
+    }
+    try {
+      const audio = await sarvamSpeak(text, voiceKey);
+      remember(sarvamKey, audio);
+      return audio;
+    } catch (err) {
+      if (tts.engine === "sarvam" || options.voiceOverride) throw new TtsUnavailableError(`Sarvam: ${(err as Error).message}`);
+      console.warn("[tts] Sarvam voice failed, using Microsoft voice:", (err as Error).message.slice(0, 160));
+    }
   }
   const key = `${voice.name}|${voice.rate}|${text}`;
   const cached = cache.get(key);

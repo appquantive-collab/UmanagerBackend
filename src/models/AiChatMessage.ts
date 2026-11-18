@@ -1,4 +1,5 @@
 import { Schema, model, Types } from "mongoose";
+import type { WorkflowStep } from "../modules/ai-chat/workflow";
 
 export type ChatRole = "user" | "assistant";
 export type ActionStatus = "pending" | "confirmed" | "dismissed";
@@ -23,7 +24,12 @@ export interface AiChatMessageDocument {
   tenantId: Types.ObjectId;
   role: ChatRole;
   content: string;
+  /** Older single proposal (kept for old chats). New replies use steps. */
   proposedAction?: ProposedAction;
+  /** Munshi AI workflow: steps confirmed one by one, in order. */
+  steps?: WorkflowStep[];
+  /** Short answers the user can tap (Munshi asked a question). */
+  quickReplies?: string[];
   createdBy: Types.ObjectId;
   createdAt: Date;
 }
@@ -38,12 +44,28 @@ const proposedActionSchema = new Schema<ProposedAction>(
   { _id: false }
 );
 
+const workflowStepSchema = new Schema<WorkflowStep>(
+  {
+    id: { type: String, required: true },
+    type: { type: String, required: true },
+    payload: { type: Schema.Types.Mixed, required: true },
+    status: { type: String, enum: ["pending", "confirmed", "dismissed"], default: "pending" },
+    auto: { type: Boolean },
+    replaced: { type: Boolean },
+    resultSummary: { type: String, trim: true },
+    resultId: { type: String },
+  },
+  { _id: false }
+);
+
 const aiChatMessageSchema = new Schema<AiChatMessageDocument>(
   {
     tenantId: { type: Schema.Types.ObjectId, ref: "Tenant", required: true, index: true },
     role: { type: String, enum: ["user", "assistant"], required: true },
     content: { type: String, required: true, trim: true },
     proposedAction: { type: proposedActionSchema },
+    steps: { type: [workflowStepSchema], default: undefined },
+    quickReplies: { type: [String], default: undefined },
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
   },
   { timestamps: { createdAt: true, updatedAt: false } }

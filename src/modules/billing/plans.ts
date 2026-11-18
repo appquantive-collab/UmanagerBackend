@@ -1,7 +1,7 @@
 import type { BillingPeriod, PlanKey } from "../../models/Tenant";
 
 /**
- * SethSathi plans. Prices are in rupees per month; longer periods get a discount.
+ * VoiceMunshi plans. Prices are in rupees per month; longer periods get a discount.
  * Change prices, discounts or AI allowances here — the app and the landing page
  * read them from GET /api/billing/plans.
  */

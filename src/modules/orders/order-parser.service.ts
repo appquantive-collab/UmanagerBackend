@@ -109,7 +109,7 @@ export async function parseOrderText(tenantId: string, text: string, catalog: Ca
     messages: [{ role: "user", content: buildPrompt(text, catalog) }],
   });
 
-  await recordAiTokens(tenantId, response.usage);
+  await recordAiTokens(tenantId, response.usage, { kind: "order_reading", model: response.model });
   const raw = response.choices[0]?.message?.content;
   if (!raw) {
     throw new Error("AI returned an empty response");

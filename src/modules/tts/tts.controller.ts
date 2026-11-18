@@ -22,7 +22,7 @@ ttsRouter.post("/", limit, async (req, res) => {
 
   try {
     const audio = await synthesize(parsed.data.text, parsed.data.lang);
-    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Type", audio.subarray(0, 4).toString("latin1") === "RIFF" ? "audio/wav" : "audio/mpeg");
     res.setHeader("Cache-Control", "private, max-age=86400");
     return res.send(audio);
   } catch (err) {

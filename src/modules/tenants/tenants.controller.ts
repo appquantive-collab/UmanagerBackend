@@ -5,6 +5,7 @@ import { recordAudit } from "../audit/audit.service";
 import { appSetupUpdateSchema, businessProfileSchema, onboardingSchema, understandSchema } from "./tenants.schemas";
 import { understandBusiness } from "./understand.service";
 import { planSetups, planSetupsSchema } from "./setup-planner.service";
+import { researchTrade, tradeResearchSchema } from "./trade.service";
 import { personalizeDashboard, saveOnboarding, updateAppSetup } from "./tenants.service";
 import { AiNotConfiguredError } from "./ai-dashboard.service";
 import { sendPlanError } from "../billing/subscription.service";
@@ -78,6 +79,13 @@ tenantsRouter.post("/onboarding/understand", requireAuth, requireTenant, async (
   const parsed = understandSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   return res.json(await understandBusiness(parsed.data.text, parsed.data.language));
+});
+
+// Setup "how do you buy and sell?": Munshi AI looks the trade up and suggests units.
+tenantsRouter.post("/onboarding/trade", requireAuth, requireTenant, async (req, res) => {
+  const parsed = tradeResearchSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  return res.json({ trade: await researchTrade(parsed.data) });
 });
 
 // Setup last step: setups written by Munshi AI for this business ({ setups: null } → app shows its fixed ones).

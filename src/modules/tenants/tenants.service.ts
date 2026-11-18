@@ -28,6 +28,17 @@ export async function saveOnboarding(tenantId: string, input: OnboardingInput) {
     staffCount: input.staffCount,
     painPoints: input.painPoints ?? null,
     goals: input.goals,
+    trade: input.trade
+      ? {
+          buyUnit: input.trade.buyUnit,
+          sellUnit: input.trade.sellUnit,
+          factor: input.trade.buyUnit === input.trade.sellUnit ? null : input.trade.factor,
+          buyUnits: [...new Set([input.trade.buyUnit, ...(input.trade.buyUnits ?? [])])],
+          sellUnits: [...new Set([input.trade.sellUnit, ...(input.trade.sellUnits ?? [])])],
+          conversions: (input.trade.conversions ?? []).filter((c) => c.unit !== input.trade!.sellUnit),
+          notes: input.trade.notes?.trim() || null,
+        }
+      : (tenant.onboarding?.trade ?? null),
     completedAt: new Date(),
   };
 

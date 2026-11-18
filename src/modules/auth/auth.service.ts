@@ -12,10 +12,19 @@ interface RegisterInput {
   businessName: string;
   businessType: string;
   ownerName: string;
-  email: string;
+  email?: string;
   password: string;
   phone?: string;
   preferredLanguage?: PreferredLanguage;
+}
+
+/** Stand-in login email for accounts made without one (owners and staff who only gave a mobile number). */
+export function isPlaceholderEmail(email: string | null | undefined): boolean {
+  return Boolean(email && email.toLowerCase().endsWith(".sethsathi.local"));
+}
+
+function shownEmail(email: string): string {
+  return isPlaceholderEmail(email) ? "" : email;
 }
 
 export class AccountExistsError extends Error {
@@ -29,13 +38,16 @@ export class AccountExistsError extends Error {
 }
 
 export async function registerTenantOwner(input: RegisterInput) {
-  const existing = await User.findOne({ email: input.email.toLowerCase() });
-  if (existing) {
-    throw new AccountExistsError("An account with this email already exists", "EMAIL_TAKEN");
+  if (input.email) {
+    const existing = await User.findOne({ email: input.email.toLowerCase(), ...BUSINESS_USER });
+    if (existing) {
+      throw new AccountExistsError("An account with this email already exists", "EMAIL_TAKEN");
+    }
   }
+  const email = (input.email ?? `${input.phone}@owner.sethsathi.local`).toLowerCase();
 
   if (input.phone) {
-    const existingPhone = await User.findOne({ phone: input.phone });
+    const existingPhone = await User.findOne({ phone: input.phone, ...BUSINESS_USER });
     if (existingPhone) {
       throw new AccountExistsError("An account with this mobile number already exists", "PHONE_TAKEN");
     }
@@ -44,14 +56,14 @@ export async function registerTenantOwner(input: RegisterInput) {
   const tenant = await Tenant.create({
     businessName: input.businessName,
     businessType: input.businessType,
-    ownerEmail: input.email.toLowerCase(),
+    ownerEmail: email,
   });
 
   const passwordHash = await bcrypt.hash(input.password, 10);
   const user = await User.create({
     tenantId: tenant._id,
     name: input.ownerName,
-    email: input.email.toLowerCase(),
+    email,
     ...(input.phone ? { phone: input.phone } : {}),
     ...(input.preferredLanguage ? { preferredLanguage: input.preferredLanguage } : {}),
     passwordHash,
@@ -61,8 +73,20 @@ export async function registerTenantOwner(input: RegisterInput) {
   return issueTokens(user);
 }
 
-export async function login(email: string, password: string) {
-  const user = await User.findOne({ email: email.toLowerCase(), isActive: true });
+/** Business sign-ins never match a VoiceMunshi admin account (admins sign in at /admin/login). */
+export const BUSINESS_USER = { role: { $ne: "PLATFORM_ADMIN" as const } };
+
+/** The VoiceMunshi team suspended this business (founder's admin panel): no new sign-ins. */
+async function assertNotSuspended(tenantId: unknown) {
+  if (!tenantId) return;
+  const tenant = await Tenant.findById(tenantId, { status: 1 }).lean();
+  if (tenant?.status === "suspended") throw new Error("This business account is suspended. Please contact VoiceMunshi.");
+}
+
+export async function login(emailOrPhone: string, password: string) {
+  const user = /^\d{10}$/.test(emailOrPhone)
+    ? await User.findOne({ phone: emailOrPhone, isActive: true, ...BUSINESS_USER })
+    : await User.findOne({ email: emailOrPhone.toLowerCase(), isActive: true, ...BUSINESS_USER });
   if (!user) {
     throw new Error("Invalid credentials");
   }
@@ -75,6 +99,7 @@ export async function login(email: string, password: string) {
   if (!valid) {
     throw new Error("Invalid credentials");
   }
+  await assertNotSuspended(user.tenantId);
 
   return issueTokens(user);
 }
@@ -113,7 +138,7 @@ function hashOtp(phone: string, code: string): string {
 }
 
 export async function requestLoginOtp(phone: string) {
-  const user = await User.findOne({ phone, isActive: true });
+  const user = await User.findOne({ phone, isActive: true, ...BUSINESS_USER });
   if (!user) {
     throw new OtpError("No account found for this mobile number", "NO_ACCOUNT", 404);
   }
@@ -162,7 +187,7 @@ export async function requestLoginOtp(phone: string) {
   }
 
   try {
-    await sendSms(phone, `${code} is your SethSathi login code. It expires in 5 minutes. Do not share it with anyone.`);
+    await sendSms(phone, `${code} is your VoiceMunshi login code. It expires in 5 minutes. Do not share it with anyone.`);
   } catch (err) {
     // The send counter is kept so a failing provider can't be hammered, but the unsent code must not stay valid.
     await PhoneOtp.updateOne({ phone }, { expiresAt: new Date(0) });
@@ -195,10 +220,11 @@ export async function verifyLoginOtp(phone: string, code: string) {
   record.expiresAt = new Date(0);
   await record.save();
 
-  const user = await User.findOne({ phone, isActive: true });
+  const user = await User.findOne({ phone, isActive: true, ...BUSINESS_USER });
   if (!user) {
     throw new OtpError("No account found for this mobile number", "NO_ACCOUNT", 404);
   }
+  await assertNotSuspended(user.tenantId);
   return issueTokens(user);
 }
 
@@ -207,19 +233,23 @@ export async function getProfile(userId: string) {
   if (!user || !user.isActive) {
     throw new Error("Account not found");
   }
+  // "Last seen" for the admin panel; written at most every 5 minutes.
+  if (!user.lastSeenAt || Date.now() - user.lastSeenAt.getTime() > 5 * 60 * 1000) {
+    void User.updateOne({ _id: user._id }, { $set: { lastSeenAt: new Date() } }).catch(() => undefined);
+  }
 
   const tenant = user.tenantId ? await Tenant.findById(user.tenantId) : null;
   const subscription = tenant ? planState(await loadSubscription(String(tenant._id))) : null;
-  const platformAdmin = Boolean(user.email && env.platformAdminEmails.includes(user.email.toLowerCase()));
+  const platformAdmin = user.role === "PLATFORM_ADMIN";
 
   return {
     userId: String(user._id),
     name: user.name,
-    email: user.email,
+    email: shownEmail(user.email),
     phone: user.phone,
     role: user.role,
     preferredLanguage: user.preferredLanguage,
-    /** SethSathi team member (PLATFORM_ADMIN_EMAILS): can give plans to any business. */
+    /** VoiceMunshi team member (PLATFORM_ADMIN_EMAILS): can give plans to any business. */
     platformAdmin,
     tenant: tenant
       ? {
@@ -264,7 +294,7 @@ export function issueTokens(user: {
   return {
     accessToken: signAccessToken(payload),
     refreshToken: signRefreshToken(payload),
-    user: { ...payload, name: user.name, email: user.email, preferredLanguage: user.preferredLanguage },
+    user: { ...payload, name: user.name, email: shownEmail(user.email), preferredLanguage: user.preferredLanguage },
   };
 }
 

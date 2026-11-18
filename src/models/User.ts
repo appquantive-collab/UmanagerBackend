@@ -1,6 +1,7 @@
 import { Schema, model, Types } from "mongoose";
 
-export type UserRole = "SUPER_ADMIN" | "OWNER" | "MANAGER" | "SALESMAN" | "WAREHOUSE_STAFF";
+/** PLATFORM_ADMIN: the VoiceMunshi team (founder's console). No business; signs in at /admin/login only. */
+export type UserRole = "SUPER_ADMIN" | "OWNER" | "MANAGER" | "SALESMAN" | "WAREHOUSE_STAFF" | "PLATFORM_ADMIN";
 export type PreferredLanguage = "en" | "hi" | "hi-Latn";
 
 export interface UserDocument {
@@ -15,6 +16,8 @@ export interface UserDocument {
   appleId?: string;
   role: UserRole;
   isActive: boolean;
+  /** Last time the app was opened (profile load), at most every few minutes. For the founder's admin panel. */
+  lastSeenAt?: Date | null;
   preferredLanguage: PreferredLanguage;
   createdAt: Date;
   updatedAt: Date;
@@ -31,10 +34,11 @@ const userSchema = new Schema<UserDocument>(
     appleId: { type: String },
     role: {
       type: String,
-      enum: ["SUPER_ADMIN", "OWNER", "MANAGER", "SALESMAN", "WAREHOUSE_STAFF"],
+      enum: ["SUPER_ADMIN", "OWNER", "MANAGER", "SALESMAN", "WAREHOUSE_STAFF", "PLATFORM_ADMIN"],
       required: true,
     },
     isActive: { type: Boolean, default: true },
+    lastSeenAt: { type: Date, default: null },
     preferredLanguage: { type: String, enum: ["en", "hi", "hi-Latn"], default: "en" },
   },
   { timestamps: true }

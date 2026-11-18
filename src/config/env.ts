@@ -29,6 +29,8 @@ export const env = {
   // open models behind an OpenAI-compatible API, so the same `openai` SDK is
   // reused with a different baseURL rather than adding a second SDK dependency.
   groqApiKey: process.env.GROQ_API_KEY || null,
+  /** Sarvam AI speech-to-text (Hinglish). Optional: without it, Whisper is used. */
+  sarvamApiKey: process.env.KEY_SARVAM || process.env.SARVAM_API_KEY || null,
   // Optional: product image upload is disabled (fails gracefully) until this is set.
   // The cloudinary SDK reads CLOUDINARY_URL from the environment itself; this
   // flag just lets the app know whether that happened.
@@ -48,7 +50,7 @@ export const env = {
     keySecret: process.env.RAZORPAY_KEY_SECRET || null,
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || null,
   },
-  // SethSathi's own team: these sign-in emails can see every business and give
+  // VoiceMunshi's own team: these sign-in emails can see every business and give
   // or extend plans by hand (offline payments, free months). Comma-separated.
   platformAdminEmails: (process.env.PLATFORM_ADMIN_EMAILS ?? "")
     .split(",")

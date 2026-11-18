@@ -1,20 +1,29 @@
 import { z } from "zod";
 
-export const registerSchema = z.object({
-  businessName: z.string().min(2),
-  businessType: z.string().min(2),
-  ownerName: z.string().min(2),
-  email: z.string().email(),
-  password: z.string().min(8),
-  phone: z
-    .string()
-    .regex(/^\d{10}$/)
-    .optional(),
-  preferredLanguage: z.enum(["en", "hi", "hi-Latn"]).optional(),
-});
+const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
+
+export const registerSchema = z
+  .object({
+    businessName: z.string().min(2),
+    businessType: z.string().min(2),
+    ownerName: z.string().min(2),
+    // Optional: many shopkeepers have no email. They then sign in with their mobile number.
+    email: z.preprocess(blankToUndefined, z.string().trim().email().optional()),
+    password: z.string().min(8),
+    phone: z
+      .string()
+      .regex(/^\d{10}$/)
+      .optional(),
+    preferredLanguage: z.enum(["en", "hi", "hi-Latn"]).optional(),
+  })
+  .refine((v) => v.email || v.phone, { message: "Give an email or a mobile number", path: ["email"] });
 
 export const loginSchema = z.object({
-  email: z.string().email(),
+  /** Email, or the 10-digit mobile number the account was made with. */
+  email: z
+    .string()
+    .trim()
+    .refine((v) => /^\d{10}$/.test(v) || z.string().email().safeParse(v).success),
   password: z.string().min(8),
 });
 

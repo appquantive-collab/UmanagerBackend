@@ -91,6 +91,18 @@ export const onboardingSchema = z.object({
     .optional(),
   /** Starter item categories to create (e.g. "Snacks", "Soap & Detergent"). */
   starterCategories: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
+  /** How they buy and sell: units and the rough conversion between them. */
+  trade: z
+    .object({
+      buyUnit: z.string().trim().min(1).max(20),
+      sellUnit: z.string().trim().min(1).max(20),
+      factor: z.number().positive().max(100000).nullable(),
+      buyUnits: z.array(z.string().trim().min(1).max(20)).max(6).optional(),
+      sellUnits: z.array(z.string().trim().min(1).max(20)).max(6).optional(),
+      conversions: z.array(z.object({ unit: z.string().trim().min(1).max(20), factor: z.number().positive().max(100000) })).max(6).optional(),
+      notes: z.string().trim().max(500).nullable().optional(),
+    })
+    .optional(),
 });
 
 export const understandSchema = z.object({

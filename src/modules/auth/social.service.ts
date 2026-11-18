@@ -1,3 +1,4 @@
+import { BUSINESS_USER } from "./auth.service";
 import { createHash } from "crypto";
 import jwt from "jsonwebtoken";
 import { env } from "../../config/env";
@@ -81,10 +82,10 @@ export async function socialSignIn(provider: SocialProvider, token: string, name
   const identity = await verifyProviderToken(provider, token, nameHint);
   const field = providerField(provider);
 
-  let user = await User.findOne({ [field]: identity.sub, isActive: true });
+  let user = await User.findOne({ [field]: identity.sub, isActive: true, ...BUSINESS_USER });
   if (!user) {
     // Same verified email as an existing account: link it rather than create a duplicate.
-    user = await User.findOne({ email: identity.email, isActive: true });
+    user = await User.findOne({ email: identity.email, isActive: true, ...BUSINESS_USER });
     if (user) {
       user.set(field, identity.sub);
       await user.save();
@@ -109,10 +110,10 @@ export async function completeSocialSignup(input: {
     throw new SocialAuthError("This sign-up has expired. Please continue with Google or Apple again.", 401, "SIGNUP_EXPIRED");
   }
 
-  if (await User.findOne({ email: identity.email })) {
+  if (await User.findOne({ email: identity.email, ...BUSINESS_USER })) {
     throw new AccountExistsError("An account with this email already exists", "EMAIL_TAKEN");
   }
-  if (await User.findOne({ phone: input.phone })) {
+  if (await User.findOne({ phone: input.phone, ...BUSINESS_USER })) {
     throw new AccountExistsError("An account with this mobile number already exists", "PHONE_TAKEN");
   }
 

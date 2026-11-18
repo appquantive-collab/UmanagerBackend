@@ -1,3 +1,7 @@
+import { accountGate } from "./middleware/accountGate";
+import { aiAttribution } from "./modules/billing/ai-cost.service";
+import { adminRouter } from "./modules/platform-admin/admin.controller";
+import { adminAuthRouter } from "./modules/platform-admin/admin-auth.controller";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -56,6 +60,10 @@ export function createApp() {
   const notWarehouse = [requireAuth, denyRoles("WAREHOUSE_STAFF")];
   const managersOnly = [requireAuth, ownerOrManager];
 
+  // Suspended business / stopped login → turned away at once (see middleware/accountGate).
+  app.use(accountGate);
+  // AI calls made while serving a request are costed against that business.
+  app.use(aiAttribution);
   // Ended plan → read-only (see middleware/planGate).
   app.use(planGate);
 
@@ -85,6 +93,10 @@ export function createApp() {
   app.use("/api/daybook", ...managersOnly, daybookRouter);
   app.use("/api/team", teamRouter);
   app.use("/api/audit", auditRouter);
+  // Founder's console: every business and login (PLATFORM_ADMIN_EMAILS only).
+  app.use("/api/admin", adminRouter);
+  // VoiceMunshi team sign-in (separate from the shops' /api/auth).
+  app.use("/api/admin-auth", adminAuthRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ error: "Not found" });

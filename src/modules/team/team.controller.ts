@@ -2,6 +2,7 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { ownerOrManager, requireAuth, requireTenant } from "../../middleware/auth";
+import { isPlaceholderEmail } from "../auth/auth.service";
 import { User } from "../../models/User";
 import { recordAudit } from "../audit/audit.service";
 
@@ -34,7 +35,7 @@ const updateMemberSchema = z.object({
 const view = (u: { _id: unknown; name: string; email: string; phone: string | null; role: string; isActive: boolean; createdAt: Date }) => ({
   _id: String(u._id),
   name: u.name,
-  email: u.email.endsWith("@staff.sethsathi.local") ? null : u.email,
+  email: isPlaceholderEmail(u.email) ? null : u.email,
   phone: u.phone,
   role: u.role,
   isActive: u.isActive,
@@ -57,11 +58,11 @@ teamRouter.post("/", async (req, res) => {
   if (role === "MANAGER" && req.auth!.role === "MANAGER") {
     return res.status(403).json({ error: "Only the owner can add a manager", code: "FORBIDDEN" });
   }
-  if (phone && (await User.exists({ phone }))) {
+  if (phone && (await User.exists({ phone, role: { $ne: "PLATFORM_ADMIN" } }))) {
     return res.status(409).json({ error: "An account with this mobile number already exists", code: "PHONE_TAKEN" });
   }
   const loginEmail = (email ?? `${phone}@staff.sethsathi.local`).toLowerCase();
-  if (await User.exists({ email: loginEmail })) {
+  if (await User.exists({ email: loginEmail, role: { $ne: "PLATFORM_ADMIN" } })) {
     return res.status(409).json({ error: "An account with this email already exists", code: "EMAIL_TAKEN" });
   }
   const user = await User.create({

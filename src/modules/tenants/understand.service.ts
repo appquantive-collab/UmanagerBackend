@@ -1,3 +1,4 @@
+import { logAiCall } from "../billing/ai-cost.service";
 import { env } from "../../config/env";
 import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
 import type { BusinessCategory, BusinessRole } from "../../models/Tenant";
@@ -112,6 +113,7 @@ Return ONLY JSON: {"category": "<one of: ${CATEGORIES.join(", ")}>", "roles": ["
         { role: "user", content: text.slice(0, 500) },
       ],
     } as never);
+    void logAiCall({ kind: "setup", model: GROQ_CHAT_MODEL, usage: (completion as { usage?: Parameters<typeof logAiCall>[0]["usage"]; model?: string }).usage });
     const raw = (completion as { choices: { message: { content: string | null } }[] }).choices[0]?.message?.content ?? "";
     const parsed = JSON.parse(raw) as Partial<Understanding> & { roles?: string[] };
     const category = CATEGORIES.includes(parsed.category as BusinessCategory) ? (parsed.category as BusinessCategory) : fallback.category;

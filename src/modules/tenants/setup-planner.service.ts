@@ -1,3 +1,4 @@
+import { logAiCall } from "../billing/ai-cost.service";
 import { z } from "zod";
 import { env } from "../../config/env";
 import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
@@ -49,6 +50,17 @@ export const planSetupsSchema = z.object({
   staffCount: z.number().int().min(0).max(10000).default(1),
   warehouseCount: z.number().int().min(0).max(1000).default(1),
   orderVolume: z.enum(["lt_100", "100_500", "500_2000", "gt_2000"]).optional(),
+  trade: z
+    .object({
+      buyUnit: z.string().trim().max(20),
+      sellUnit: z.string().trim().max(20),
+      factor: z.number().nullable(),
+      buyUnits: z.array(z.string().trim().max(20)).max(6).optional(),
+      sellUnits: z.array(z.string().trim().max(20)).max(6).optional(),
+      conversions: z.array(z.object({ unit: z.string().trim().max(20), factor: z.number() })).max(6).optional(),
+      notes: z.string().trim().max(500).nullable().optional(),
+    })
+    .optional(),
   language: z.enum(["en", "hi", "hi-Latn"]).default("hi-Latn"),
 });
 export type PlanSetupsInput = z.infer<typeof planSetupsSchema>;
@@ -125,6 +137,10 @@ function describe(a: PlanSetupsInput): string {
     `Godowns: ${a.warehouseCount <= 1 ? "one" : `${a.warehouseCount}+`}`,
   ];
   if (a.orderVolume) lines.push(`Orders a month: ${a.orderVolume}`);
+  if (a.trade) {
+    const conv = a.trade.buyUnit !== a.trade.sellUnit && a.trade.factor ? ` (1 ${a.trade.buyUnit} ≈ ${a.trade.factor} ${a.trade.sellUnit})` : "";
+    lines.push(`Buys stock in ${(a.trade.buyUnits?.length ? a.trade.buyUnits : [a.trade.buyUnit]).join(" / ")}, sells in ${(a.trade.sellUnits?.length ? a.trade.sellUnits : [a.trade.sellUnit]).join(" / ")}${conv}${a.trade.notes ? `. Notes: ${a.trade.notes}` : ""}`);
+  }
   return lines.join("\n");
 }
 
@@ -142,7 +158,7 @@ export async function planSetups(input: PlanSetupsInput): Promise<PlannedSetup[]
         messages: [
           {
             role: "system",
-            content: `You set up SethSathi, a billing and stock app for Indian businesses, for one owner. Read what they told you and propose 2 or 3 different setups that fit THIS business — the first one is the best fit.
+            content: `You set up VoiceMunshi, a billing and stock app for Indian businesses, for one owner. Read what they told you and propose 2 or 3 different setups that fit THIS business — the first one is the best fit.
 ${FEATURE_GUIDE}
 
 Return ONLY JSON: {"setups": [{"base": "...", "name": "...", "tagline": "...", "points": ["...", ...], "defaultBillType": "gst" | "record", "features": {"counterSale": bool, ...all 11 keys}, "categories": ["...", ...]}]}
@@ -161,6 +177,7 @@ Rules:
       },
       { timeout: 20_000, maxRetries: 0 }
     );
+    void logAiCall({ kind: "setup", model: response.model ?? "openai/gpt-oss-120b", usage: response.usage });
     const raw = response.choices[0]?.message?.content ?? "";
     const parsed = JSON.parse(raw) as { setups?: unknown[] };
     const must = required(input);
