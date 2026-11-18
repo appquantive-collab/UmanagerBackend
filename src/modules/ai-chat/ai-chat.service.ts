@@ -74,6 +74,7 @@ Stay in that one language for the whole reply: a Hinglish reply must never switc
 - Then at most 2–3 short supporting lines. Use **bold** for key figures and short "- " bullet lists when listing items; list at most the 5 most important and say how many more there are. No tables, no headings. Amounts in ₹ with Indian digit grouping (₹1,25,000). Say negative stock plainly ("stock minus mein hai — bina stock ke bill bane hain").
 - You may give short, practical business advice when asked (pricing, reorder timing, collecting udhaar, slow-moving stock, GST basics), grounded in their data. For legal or tax filing, add that they should confirm with their CA.
 - If the question has nothing to do with business or VoiceMunshi, politely say you help with their business and the app, and offer an example question.
+- After an answer (not when you propose steps or ask a question), add ONE last line that starts with ">> " and holds 3 short follow-up questions the owner would naturally ask next about THIS answer, separated by " | ", in the same language and script as your reply, each under 7 words. Example after a reorder answer: ">> Khartaal kitna mangwaun? | Supplier kaun hai? | Kal ki bikri kitni thi?"
 
 ## How VoiceMunshi works (use this to answer "how do I…" questions)
 - Sales: "New order" notes what a customer asked for (Munshi can read a pasted WhatsApp message). "New sale" makes a bill: tap "Counter sale" for a walk-in (no name; paid by cash/UPI/bank on the spot) or pick a customer (their pending order items load). Search items by name/SKU/barcode; set quantity, box or piece, discount %; choose simple or GST bill. Selling more than stock, or going over a customer's credit limit, shows a warning with "Bill anyway". Selling reduces stock automatically.
@@ -213,7 +214,9 @@ export async function sendMessage(
     await openWorkflow.save();
   }
 
-  let assistantContent = choice?.message?.content?.trim() || "";
+  // Follow-up questions ride on the last ">> a | b | c" line: shown as chips, never as text or speech.
+  const { text: replyText, followUps } = splitFollowUps(choice?.message?.content?.trim() || "");
+  let assistantContent = replyText;
   // Never show internal step names; the card shows the steps.
   if (steps.length && wroteStepsAsText(assistantContent)) assistantContent = "";
   if (question) assistantContent = assistantContent ? `${assistantContent}\n\n${question.text}` : question.text;
@@ -228,6 +231,7 @@ export async function sendMessage(
     content: assistantContent,
     ...(steps.length ? { steps } : {}),
     ...(question?.options.length ? { quickReplies: question.options } : {}),
+    ...(!steps.length && !question && followUps.length ? { followUps } : {}),
     createdBy: userId,
   });
 
@@ -312,6 +316,22 @@ async function answerOpenStep(
   }
   const assistantMessage = await AiChatMessage.create({ tenantId, role: "assistant", content: reply, createdBy: userId });
   return { userMessage, assistantMessage, audit };
+}
+
+/** Pull the ">> a | b | c" follow-up line (if any) off the end of a reply. */
+export function splitFollowUps(raw: string): { text: string; followUps: string[] } {
+  const lines = raw.split("\n");
+  const followUps: string[] = [];
+  const kept = lines.filter((line) => {
+    const m = line.trim().match(/^(?:>>|»)\s*(.+)$/);
+    if (!m) return true;
+    for (const q of m[1].split("|")) {
+      const clean = q.replace(/\*\*/g, "").trim();
+      if (clean && clean.length <= 80 && followUps.length < 4) followUps.push(clean);
+    }
+    return false;
+  });
+  return { text: kept.join("\n").trim(), followUps };
 }
 
 function workflowIntro(count: number, language: ReplyLanguage): string {

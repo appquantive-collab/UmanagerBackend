@@ -30,6 +30,8 @@ export interface AiChatMessageDocument {
   steps?: WorkflowStep[];
   /** Short answers the user can tap (Munshi asked a question). */
   quickReplies?: string[];
+  /** Questions the owner may ask next about this answer (suggestion chips). */
+  followUps?: string[];
   createdBy: Types.ObjectId;
   createdAt: Date;
 }
@@ -66,6 +68,7 @@ const aiChatMessageSchema = new Schema<AiChatMessageDocument>(
     proposedAction: { type: proposedActionSchema },
     steps: { type: [workflowStepSchema], default: undefined },
     quickReplies: { type: [String], default: undefined },
+    followUps: { type: [String], default: undefined },
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
   },
   { timestamps: { createdAt: true, updatedAt: false } }

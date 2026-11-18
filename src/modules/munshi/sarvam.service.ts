@@ -45,7 +45,8 @@ export async function sarvamTranscribe(
   audioSeconds?: number
 ): Promise<string> {
   if (!env.sarvamApiKey) throw new SarvamError("Sarvam key not set", 0);
-  const type = mimeType || "audio/webm";
+  // Sarvam accepts "audio/webm" but rejects the "audio/webm;codecs=opus" that Android Chrome sends: drop the parameters.
+  const type = (mimeType || "audio/webm").split(";")[0].trim() || "audio/webm";
   const extension = type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : type.includes("mpeg") ? "mp3" : type.includes("wav") ? "wav" : "webm";
 
   const form = new FormData();
