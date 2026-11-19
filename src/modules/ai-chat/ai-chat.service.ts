@@ -93,7 +93,10 @@ Stay in that one language for the whole reply: a Hinglish reply must never switc
 When the user asks you to DO something that changes data, call tools to propose it. Each tool call becomes one step the user reviews and confirms in order; you cannot act directly.
 - One message can hold several jobs. Put ALL of them in ONE propose_steps call as a list, one step per job, in the order they happened. Example: "Rajesh ji se 5 kg aalu liya, Ravi aur Kishan ko 1-1 kg becha, dono ke bill banao" → propose_steps with steps: record_purchase (Rajesh, Aalu 5 kg), create_bill (Ravi, Aalu 1 kg), create_bill (Kishan, Aalu 1 kg).
 - Bought / took goods from someone (liya, kharida, mangwaya, aaya) → record_purchase. Sold / gave goods (becha, bech diya, de diya) or "bill banao" → create_bill, one per customer. A customer asking for goods to be sent later → create_order.
-- "Supplier/customer/item add karo" → a create_supplier / create_customer / create_product step. Missing suppliers, customers and items for purchases and bills are added automatically as extra steps; do not add them yourself.
+- You can do almost every job in the app: purchases, bills, orders, billing an order, money received from customers, paying suppliers, shop expenses, editing or cancelling a bill, changing a saved customer / supplier / item (name, phone, price) or staff member, fixing stock, attendance, adding staff. Use a step for any of these; never tell the owner to go and do it on a screen.
+- To fix something already done ("pichla bill galat hai, 10 kg tha", "Ravi ka number galat hai", "dubara karo"), make the matching edit step (edit_bill with the bill number and the full corrected items, update_customer, update_product, adjust_stock…) instead of making a new one.
+- "Staff / worker / karigar add karo" (with department, mobile, salary or daily wage if said) → one create_staff step per person; "Pulkit ko labour department mein daal do" sets that step's department. You CAN add staff: never send the owner to Settings for it.
+- "Supplier/customer/item add karo" → a create_supplier / create_customer / create_product step. Missing suppliers, customers and items for purchases and bills are added automatically as extra steps; do not add them yourself, and never ask "item/supplier list mein nahi hai, add karein?": just propose the job.
 - Use names, quantities, units and prices exactly as said; never invent prices, discounts or amounts. Leave a price out if it wasn't said (the item's saved price is used).
 - If something essential is missing (the name of the person, which item, how many) or it's unclear whether they sold or only took an order, call ask_user with one short question and real tappable options (names from the snapshot or plain choices, never made-up names); you may also call propose_steps for whatever IS clear. If the user just says "supplier add karo" with no name, ask for the name.
 - Quantity and rate in different units ("2 kilo kapda bech do, 50 rupaye per meter"): never put a per-meter rate on kilos. If the business data gives the conversion (e.g. "1 kg ≈ 7 meter"), convert the quantity to the rate's unit (2 kg ≈ 14 meter @ ₹50) and say in your text that you converted it so they can correct it; otherwise call ask_user ("2 kilo mein kitne meter hue?") and propose only the other steps.
@@ -183,7 +186,7 @@ export async function sendMessage(
     { role: "system" as const, content: languageRule(content, language) },
     { role: "user" as const, content },
   ];
-  const ask = (force: boolean) =>
+  const askOnce = (force: boolean) =>
     chatWithFallback((model) =>
       client.chat.completions.create({
         model,
@@ -192,13 +195,26 @@ export async function sendMessage(
         messages,
       })
     );
+  // Groq rejects a reply whose tool call doesn't fit the schema ("tool call validation
+  // failed"); the model usually gets it right on a second try.
+  const ask = async (force: boolean) => {
+    try {
+      return await askOnce(force);
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      if (e.status !== 400 || !/tool call validation|tool_use_failed|failed to call a function/i.test(e.message ?? "")) throw err;
+      console.warn("[ai-chat] tool call rejected, asking again:", (e.message ?? "").slice(0, 200));
+      return askOnce(force);
+    }
+  };
 
   let response = await ask(false);
   await recordAiTokens(tenantId, response.usage, { kind: "chat", model: response.model });
   let choice = response.choices[0];
   // The model sometimes answers a correction by writing the steps out as text
   // ("create_supplier – name: Rajesh…"). Ask once more, this time for a card.
-  const wroteStepsAsText = (text: string) => /\b(create_(customer|supplier|product|bill|order)|record_purchase|mark_attendance)\b/.test(text);
+  const wroteStepsAsText = (text: string) =>
+    /\b(create_\w+|update_\w+|record_purchase|mark_attendance|receive_payment|pay_supplier|add_expense|edit_bill|cancel_bill|bill_order|adjust_stock)\b/.test(text);
   if (!choice?.message?.tool_calls?.length && openWorkflow && wroteStepsAsText(choice?.message?.content ?? "")) {
     response = await ask(true);
     await recordAiTokens(tenantId, response.usage, { kind: "chat", model: response.model });
@@ -240,6 +256,34 @@ export async function sendMessage(
       JSON.stringify((openWorkflow.steps ?? []).filter((s) => s.status === "pending").map((s) => [s.type, s.payload]));
   if (sameAsOpen) steps.length = 0;
 
+  // The user filled in or corrected the waiting steps (by voice or text): change them in
+  // the same list, and if the open one changed, do it straight away and move to the next.
+  const waitingSteps = openWorkflow ? (openWorkflow.steps ?? []).filter((s) => s.status === "pending") : [];
+  if (openWorkflow && !question && steps.length && steps.length === waitingSteps.length && steps.every((s, i) => s.type === waitingSteps[i].type)) {
+    const lang = language ?? "hi-Latn";
+    const words = STEP_WORDS[lang];
+    const openChanged = JSON.stringify(waitingSteps[0].payload) !== JSON.stringify(steps[0].payload);
+    waitingSteps.forEach((s, i) => {
+      s.payload = steps[i].payload;
+    });
+    openWorkflow.markModified("steps");
+    await openWorkflow.save();
+    let reply = words.updated;
+    let audit: StepAudit | undefined;
+    if (openChanged) {
+      try {
+        const result = await confirmStep(tenantId, userId, role, String(openWorkflow._id), waitingSteps[0].id, {});
+        audit = result.audit;
+        const ref = result.message.steps?.find((s) => s.id === waitingSteps[0].id)?.resultSummary;
+        reply = `${words.done}${ref ? ` (${ref})` : ""}. ${(result.message.steps ?? []).some((s) => s.status === "pending") ? words.next : words.allDone}`;
+      } catch (err) {
+        reply = `${words.updated} ${words.failed} ${(err as Error).message}`;
+      }
+    }
+    const assistantMessage = await AiChatMessage.create({ tenantId, role: "assistant", content: reply, createdBy: userId });
+    return { userMessage, assistantMessage, audit };
+  }
+
   if (steps.length && openWorkflow) {
     for (const step of openWorkflow.steps ?? []) {
       if (step.status === "pending") {
@@ -269,6 +313,9 @@ export async function sendMessage(
     }[lang];
   }
   if (!assistantContent) {
+    console.warn(
+      `[ai-chat] empty reply (finish ${choice?.finish_reason}, model ${response.model}, tool calls ${JSON.stringify(calls).slice(0, 400)}, text ${JSON.stringify(choice?.message?.content ?? "").slice(0, 200)})`
+    );
     assistantContent = {
       "hi-Latn": "Maaf kijiye, yeh samajh nahi paya. Thoda alag tarah se batayenge?",
       hi: "माफ़ कीजिए, यह समझ नहीं पाया। थोड़ा अलग तरह से बताएँगे?",
@@ -331,8 +378,9 @@ export function quickIntent(text: string): "yes" | "no" | null {
   return null;
 }
 
-const STEP_WORDS: Record<ReplyLanguage, { done: string; skipped: string; next: string; allDone: string; failed: string }> = {
+const STEP_WORDS: Record<ReplyLanguage, { done: string; skipped: string; next: string; allDone: string; failed: string; updated: string }> = {
   "hi-Latn": {
+    updated: "Badal diya, upar list mein dekh lijiye.",
     done: "Ho gaya ✓",
     skipped: "Theek hai, yeh kaam chhod diya.",
     next: "Agla kaam upar list mein khula hai. Sahi ho to \"haan\" boliye, ya wahin badliye.",
@@ -340,6 +388,7 @@ const STEP_WORDS: Record<ReplyLanguage, { done: string; skipped: string; next: s
     failed: "Yeh kaam nahi ho paaya:",
   },
   hi: {
+    updated: "बदल दिया, ऊपर सूची में देख लीजिए।",
     done: "हो गया ✓",
     skipped: "ठीक है, यह काम छोड़ दिया।",
     next: "अगला काम ऊपर सूची में खुला है। सही हो तो \"हाँ\" बोलिए, या वहीं बदलिए।",
@@ -347,6 +396,7 @@ const STEP_WORDS: Record<ReplyLanguage, { done: string; skipped: string; next: s
     failed: "यह काम नहीं हो पाया:",
   },
   en: {
+    updated: "Changed it, see the list above.",
     done: "Done ✓",
     skipped: "Okay, skipped that one.",
     next: "The next step is open in the list above. Say \"yes\" if it's right, or change it there.",
