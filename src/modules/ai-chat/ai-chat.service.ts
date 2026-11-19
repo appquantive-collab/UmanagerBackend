@@ -1,6 +1,6 @@
 import { HydratedDocument } from "mongoose";
 import { env } from "../../config/env";
-import { chatWithFallback, getGroqClient } from "../../config/groq";
+import { GROQ_FALLBACK_MODEL, chatWithFallback, getGroqClient } from "../../config/groq";
 import { assertAiTokens, recordAiTokens } from "../billing/subscription.service";
 import { AiChatMessage, type ActionType, type AiChatMessageDocument } from "../../models/AiChatMessage";
 import { Customer } from "../../models/Customer";
@@ -276,13 +276,20 @@ export async function sendMessage(
     }[lang];
   }
 
+  // The model forgot the ">>" line: the small model writes follow-ups for THIS answer,
+  // so the chips are never the generic starters after a real answer.
+  const finalFollowUps =
+    !steps.length && !question && !alreadyDone.length && followUps.length === 0 && replyText
+      ? await suggestFollowUps(tenantId, content, assistantContent, lang)
+      : followUps;
+
   const assistantMessage = await AiChatMessage.create({
     tenantId,
     role: "assistant",
     content: assistantContent,
     ...(steps.length ? { steps } : {}),
     ...(question?.options.length ? { quickReplies: question.options } : {}),
-    ...(!steps.length && !question && followUps.length ? { followUps } : {}),
+    ...(!steps.length && !question && finalFollowUps.length ? { followUps: finalFollowUps } : {}),
     createdBy: userId,
   });
 
@@ -379,6 +386,43 @@ async function answerOpenStep(
   }
   const assistantMessage = await AiChatMessage.create({ tenantId, role: "assistant", content: reply, createdBy: userId });
   return { userMessage, assistantMessage, audit };
+}
+
+const FOLLOW_UP_LANG: Record<ReplyLanguage, string> = {
+  "hi-Latn": "Hinglish in Roman letters (like: Kal ki bikri kitni thi?)",
+  hi: "Hindi in Devanagari",
+  en: "simple English",
+};
+
+/**
+ * Three short questions the shop owner would naturally ask next about this
+ * answer (shown as tap-chips). Small fast model; on any failure, no chips.
+ */
+async function suggestFollowUps(tenantId: string, question: string, answer: string, language: ReplyLanguage): Promise<string[]> {
+  try {
+    const response = await getGroqClient().chat.completions.create(
+      {
+        model: GROQ_FALLBACK_MODEL,
+        reasoning_effort: "low",
+        temperature: 0.4,
+        max_completion_tokens: 400,
+        messages: [
+          {
+            role: "system",
+            content: `You suggest what an Indian shop owner would tap next in a chat with Munshi, their business assistant (it knows their sales, stock, bills, udhaar, suppliers and can create bills, sales, purchases, customers). Given their question and Munshi's answer, write exactly 3 short follow-ups (each under 7 words) that continue THIS answer: dig deeper, act on it, or the obvious next check. Write them as the owner speaking, in ${FOLLOW_UP_LANG[language]}. No numbering. Reply with only one line: a | b | c`,
+          },
+          { role: "user", content: `Owner: ${question.slice(0, 400)}\nMunshi: ${answer.slice(0, 1200)}` },
+        ],
+      },
+      { timeout: 2500, maxRetries: 0 }
+    );
+    await recordAiTokens(tenantId, response.usage, { kind: "chat", model: response.model });
+    const line = (response.choices[0]?.message?.content ?? "").split("\n").find((l) => l.includes("|")) ?? "";
+    return splitFollowUps(`>> ${line.replace(/^>>\s*/, "")}`).followUps.slice(0, 3);
+  } catch (err) {
+    console.warn("[ai-chat] follow-ups failed:", (err as Error).message.slice(0, 120));
+    return [];
+  }
 }
 
 /** Pull the ">> a | b | c" follow-up line (if any) off the end of a reply. */

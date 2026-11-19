@@ -18,6 +18,7 @@ import {
   login,
   registerTenantOwner,
   requestLoginOtp,
+  ProfileError,
   updateProfile,
   verifyLoginOtp,
 } from "./auth.service";
@@ -118,6 +119,10 @@ authRouter.patch("/me", requireAuth, async (req, res) => {
     const result = await updateProfile(req.auth!.userId, parsed.data);
     return res.json(result);
   } catch (err) {
+    if (err instanceof ProfileError) {
+      const status = err.code === "WRONG_PASSWORD" ? 400 : err.code === "NEED_EMAIL_OR_PHONE" ? 400 : 409;
+      return res.status(status).json({ error: err.message, code: err.code });
+    }
     return res.status(404).json({ error: (err as Error).message });
   }
 });

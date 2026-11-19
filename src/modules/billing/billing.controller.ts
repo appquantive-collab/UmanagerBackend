@@ -7,12 +7,13 @@ import { Tenant } from "../../models/Tenant";
 import { User } from "../../models/User";
 import { AiUsage } from "../../models/AiUsage";
 import { SubscriptionPayment } from "../../models/SubscriptionPayment";
-import { getSttEngine, getTtsSettings, setSttEngine, setTtsSettings } from "../../models/PlatformSetting";
+import { getAiBudgets, getSttEngine, getTtsSettings, setSttEngine, setTtsSettings } from "../../models/PlatformSetting";
+import { chatMessageCostInr, rupeesPerToken, tokenYardsticks } from "./ai-cost.service";
 import { SARVAM_VOICES, type SarvamVoiceKey, sarvamTtsAvailable } from "../tts/sarvam-tts.service";
 import { synthesize } from "../tts/tts.service";
 import { sarvamAvailable } from "../munshi/sarvam.service";
 import { priceFor, priceList } from "./plans";
-import { aiUsage, applyPurchase, getPlanState, planState, usageMonth } from "./subscription.service";
+import { aiAllowance, aiTodayByUse, aiUsage, applyPurchase, getPlanState, planState, usageMonth } from "./subscription.service";
 import { createRazorpayOrder, razorpayConfigured, verifyPaymentSignature, verifyWebhookSignature } from "./razorpay";
 
 export const billingRouter = Router();
@@ -21,21 +22,55 @@ const planSchema = z.enum(["basic", "pro"]);
 const periodSchema = z.enum(["monthly", "quarterly", "annual"]);
 
 // Public: the landing page shows the same prices the app charges.
-billingRouter.get("/plans", (_req, res) => {
-  res.json(priceList());
+/** Roughly how many Munshi AI questions each plan's daily allowance covers (rounded down to 5s). */
+async function aiQuestionsPerDay() {
+  const [budgets, perMessage, rate] = await Promise.all([getAiBudgets(), chatMessageCostInr(), rupeesPerToken()]);
+  const perDay = (rupeesPerMonth: number) => Math.max(1, Math.floor(rupeesPerMonth / 30 / perMessage / 5) * 5);
+  // Daily tokens, rounded to a clean thousand.
+  const tokensPerDay = (rupeesPerMonth: number) => Math.round(rupeesPerMonth / 30 / rate / 1000) * 1000;
+  return { questions: { basic: perDay(budgets.basic), pro: perDay(budgets.pro) }, tokens: { basic: tokensPerDay(budgets.basic), pro: tokensPerDay(budgets.pro) } };
+}
+
+billingRouter.get("/plans", async (_req, res) => {
+  const ai = await aiQuestionsPerDay();
+  res.json(priceList(ai.questions, ai.tokens));
 });
 
 /** The business's plan, this month's AI tokens, and past purchases. */
 billingRouter.get("/", requireAuth, requireTenant, async (req, res) => {
   const tenantId = req.auth!.tenantId!;
-  const [state, usage, payments] = await Promise.all([
+  const [state, allowance, payments, byUse, rate, stt] = await Promise.all([
     getPlanState(tenantId),
-    aiUsage(tenantId),
+    aiAllowance(tenantId),
     SubscriptionPayment.find({ tenantId, status: "paid" }).sort({ paidAt: -1 }).limit(24).lean(),
+    aiTodayByUse(tenantId),
+    rupeesPerToken(),
+    getSttEngine(),
   ]);
+  const yard = await tokenYardsticks(stt);
+  const tok = (inr: number) => Math.round(inr / rate);
+  const remaining = Math.max(0, tok(allowance.dailyInr) - tok(allowance.todayInr));
   res.json({
     state,
-    usage: { ...usage, limit: state.aiTokenLimit },
+    // Percentages only: businesses never see what AI costs us.
+    usage: {
+      todayPct: allowance.todayPct,
+      monthPct: allowance.monthPct,
+      unlimited: allowance.unlimited,
+      exhausted: allowance.exhausted,
+      resetsAt: allowance.resetsAt,
+      // Tokens on one scale for everything AI (see ai-cost.service rupeesPerToken).
+      todayTokens: tok(allowance.todayInr),
+      dailyTokens: tok(allowance.dailyInr),
+      remainingTokens: remaining,
+      monthTokens: tok(allowance.monthInr),
+      monthlyTokens: tok(allowance.monthlyInr),
+      todayByUse: { questions: tok(byUse.questions), speaking: tok(byUse.speaking), voice: tok(byUse.voice), other: tok(byUse.other) },
+      tokensPerQuestion: yard.perQuestion,
+      tokensPerSpeechMinute: yard.perSpeechMinute,
+      remainingQuestions: yard.perQuestion > 0 ? Math.floor(remaining / yard.perQuestion) : 0,
+      remainingSpeechMinutes: yard.perSpeechMinute > 0 ? Math.floor((remaining / yard.perSpeechMinute) * 10) / 10 : 0,
+    },
     payments: payments.map((p) => ({
       id: String(p._id),
       plan: p.plan,
@@ -49,7 +84,7 @@ billingRouter.get("/", requireAuth, requireTenant, async (req, res) => {
       periodEnd: p.periodEnd,
     })),
     onlinePayments: razorpayConfigured(),
-    ...priceList(),
+    ...(await aiQuestionsPerDay().then((ai) => priceList(ai.questions, ai.tokens))),
   });
 });
 

@@ -20,6 +20,8 @@ export type AiKind =
 export interface AiCallDocument {
   _id: Types.ObjectId;
   tenantId: Types.ObjectId | null;
+  /** The login that made it (null before sign-up or for system jobs). */
+  userId?: Types.ObjectId | null;
   at: Date;
   /** India date / month, for daily and monthly totals. */
   day: string;
@@ -38,6 +40,7 @@ export interface AiCallDocument {
 
 const aiCallSchema = new Schema<AiCallDocument>({
   tenantId: { type: Schema.Types.ObjectId, ref: "Tenant", default: null },
+  userId: { type: Schema.Types.ObjectId, ref: "User", default: null },
   at: { type: Date, required: true },
   day: { type: String, required: true },
   month: { type: String, required: true },
@@ -55,5 +58,6 @@ const aiCallSchema = new Schema<AiCallDocument>({
 aiCallSchema.index({ month: 1, tenantId: 1 });
 aiCallSchema.index({ day: 1 });
 aiCallSchema.index({ tenantId: 1, at: -1 });
+aiCallSchema.index({ tenantId: 1, day: 1 });
 
 export const AiCall = model<AiCallDocument>("AiCall", aiCallSchema);

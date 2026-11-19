@@ -50,8 +50,8 @@ export function isBillingPeriod(v: unknown): v is BillingPeriod {
   return v === "monthly" || v === "quarterly" || v === "annual";
 }
 
-/** Price list sent to the app. */
-export function priceList() {
+/** Price list sent to the app. aiQuestionsPerDay: roughly how many Munshi AI questions the daily allowance covers. */
+export function priceList(aiQuestionsPerDay?: Partial<Record<PlanKey, number>>, aiTokensPerDay?: Partial<Record<PlanKey, number>>) {
   return {
     trialDays: TRIAL_DAYS,
     proFeatures: PRO_FEATURES,
@@ -59,6 +59,8 @@ export function priceList() {
       key,
       monthlyPrice: PLANS[key].monthlyPrice,
       aiTokensPerMonth: PLANS[key].aiTokensPerMonth,
+      aiQuestionsPerDay: aiQuestionsPerDay?.[key] ?? null,
+      aiTokensPerDay: aiTokensPerDay?.[key] ?? null,
       proFeatures: PLANS[key].proFeatures,
       prices: (Object.keys(PERIODS) as BillingPeriod[]).map((period) => ({
         period,

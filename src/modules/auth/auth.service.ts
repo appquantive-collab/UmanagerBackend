@@ -247,6 +247,8 @@ export async function getProfile(userId: string) {
     name: user.name,
     email: shownEmail(user.email),
     phone: user.phone,
+    /** Signed up with Google/Apple or OTP only: can set a password without the old one. */
+    hasPassword: Boolean(user.passwordHash),
     role: user.role,
     preferredLanguage: user.preferredLanguage,
     /** VoiceMunshi team member (PLATFORM_ADMIN_EMAILS): can give plans to any business. */
@@ -298,16 +300,81 @@ export function issueTokens(user: {
   };
 }
 
-export async function updateProfile(userId: string, patch: { preferredLanguage?: PreferredLanguage }) {
+export class ProfileError extends Error {
+  constructor(
+    message: string,
+    readonly code: "EMAIL_TAKEN" | "PHONE_TAKEN" | "NEED_EMAIL_OR_PHONE" | "WRONG_PASSWORD"
+  ) {
+    super(message);
+    this.name = "ProfileError";
+  }
+}
+
+export interface ProfilePatch {
+  preferredLanguage?: PreferredLanguage;
+  name?: string;
+  email?: string;
+  phone?: string;
+  currentPassword?: string;
+  newPassword?: string;
+}
+
+/** The signed-in person edits their own name, email, mobile, password and language. */
+export async function updateProfile(userId: string, patch: ProfilePatch) {
   const user = await User.findById(userId);
   if (!user || !user.isActive) {
     throw new Error("Account not found");
   }
 
-  if (patch.preferredLanguage) {
-    user.preferredLanguage = patch.preferredLanguage;
+  if (patch.preferredLanguage) user.preferredLanguage = patch.preferredLanguage;
+  if (patch.name) user.name = patch.name;
+
+  const realEmail = isPlaceholderEmail(user.email) ? "" : user.email;
+  const nextEmail = patch.email ?? realEmail;
+  const nextPhone = patch.phone ?? user.phone ?? "";
+  if (!nextEmail && !nextPhone) {
+    throw new ProfileError("Keep an email or a mobile number to sign in with", "NEED_EMAIL_OR_PHONE");
   }
+
+  if (patch.phone !== undefined && patch.phone !== (user.phone ?? "")) {
+    if (patch.phone) {
+      const taken = await User.exists({ phone: patch.phone, _id: { $ne: user._id }, ...BUSINESS_USER });
+      if (taken) throw new ProfileError("Another account already uses this mobile number", "PHONE_TAKEN");
+      user.phone = patch.phone;
+    } else {
+      user.set("phone", undefined);
+    }
+  }
+
+  if (patch.email !== undefined && patch.email !== realEmail) {
+    if (patch.email) {
+      const taken = await User.exists({ email: patch.email, _id: { $ne: user._id }, ...BUSINESS_USER });
+      if (taken) throw new ProfileError("Another account already uses this email", "EMAIL_TAKEN");
+      user.email = patch.email;
+    } else {
+      // No email: sign-in is by mobile number; keep a private stand-in address.
+      user.email = `${nextPhone}@${user.role === "OWNER" ? "owner" : "staff"}.sethsathi.local`;
+    }
+    if (user.role === "OWNER" && user.tenantId) {
+      await Tenant.updateOne({ _id: user.tenantId }, { $set: { ownerEmail: user.email } });
+    }
+  }
+
+  if (patch.newPassword) {
+    if (user.passwordHash) {
+      const ok = patch.currentPassword ? await bcrypt.compare(patch.currentPassword, user.passwordHash) : false;
+      if (!ok) throw new ProfileError("Current password is wrong", "WRONG_PASSWORD");
+    }
+    user.passwordHash = await bcrypt.hash(patch.newPassword, 10);
+  }
+
   await user.save();
 
-  return { preferredLanguage: user.preferredLanguage };
+  return {
+    preferredLanguage: user.preferredLanguage,
+    name: user.name,
+    email: shownEmail(user.email),
+    phone: user.phone ?? null,
+    hasPassword: Boolean(user.passwordHash),
+  };
 }

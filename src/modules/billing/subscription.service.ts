@@ -4,9 +4,13 @@ import type { Response } from "express";
 import { Types } from "mongoose";
 import { Tenant, type BillingPeriod, type PlanKey, type Subscription } from "../../models/Tenant";
 import { AiUsage } from "../../models/AiUsage";
+import { AiCall } from "../../models/AiCall";
+import { getAiBudgets, type AiBudgets } from "../../models/PlatformSetting";
 import { PERIODS, PLANS, TRIAL_DAYS, TRIAL_PLAN, type ProFeature } from "./plans";
 
 const DAY_MS = 86_400_000;
+/** subscription.aiTokenLimit at or above this = no AI limit (the team's testing switch). */
+export const UNLIMITED_AI = 1_000_000_000;
 
 export type PlanErrorCode = "PLAN_EXPIRED" | "PRO_REQUIRED" | "AI_LIMIT";
 
@@ -38,7 +42,10 @@ export interface PlanState {
   /** When the trial or paid time ends. */
   endsAt: Date | null;
   daysLeft: number;
-  aiTokenLimit: number;
+  /** Which Munshi AI budget applies (null: plan ended, no AI). */
+  aiBudgetKey: "basic" | "pro" | "trial" | null;
+  /** Set by the VoiceMunshi team (testing): no AI limit. */
+  aiUnlimited: boolean;
 }
 
 export function planState(sub: Subscription | null, now = new Date()): PlanState {
@@ -51,7 +58,8 @@ export function planState(sub: Subscription | null, now = new Date()): PlanState
       isPro: PLANS[sub.plan].proFeatures,
       endsAt: sub.currentPeriodEnd,
       daysLeft: daysUntil(sub.currentPeriodEnd),
-      aiTokenLimit: sub.aiTokenLimit ?? PLANS[sub.plan].aiTokensPerMonth,
+      aiBudgetKey: sub.plan,
+      aiUnlimited: (sub.aiTokenLimit ?? 0) >= UNLIMITED_AI,
     };
   }
   if (!sub?.plan && sub?.trialEndsAt && sub.trialEndsAt > now) {
@@ -62,7 +70,8 @@ export function planState(sub: Subscription | null, now = new Date()): PlanState
       isPro: PLANS[TRIAL_PLAN].proFeatures,
       endsAt: sub.trialEndsAt,
       daysLeft: daysUntil(sub.trialEndsAt),
-      aiTokenLimit: sub.aiTokenLimit ?? PLANS[TRIAL_PLAN].aiTokensPerMonth,
+      aiBudgetKey: "trial",
+      aiUnlimited: (sub.aiTokenLimit ?? 0) >= UNLIMITED_AI,
     };
   }
   return {
@@ -72,7 +81,8 @@ export function planState(sub: Subscription | null, now = new Date()): PlanState
     isPro: false,
     endsAt: sub?.currentPeriodEnd ?? sub?.trialEndsAt ?? null,
     daysLeft: 0,
-    aiTokenLimit: 0,
+    aiBudgetKey: null,
+    aiUnlimited: (sub?.aiTokenLimit ?? 0) >= UNLIMITED_AI,
   };
 }
 
@@ -151,6 +161,7 @@ export async function applyPurchase(
     period: input.period ?? (sub.plan === input.plan ? sub.period : null),
     trialEndsAt: sub.trialEndsAt,
     currentPeriodEnd: end,
+    aiTokenLimit: sub.aiTokenLimit ?? null,
   };
   await Tenant.updateOne({ _id: tenantId }, { $set: { subscription: next } });
   clearPlanCache(tenantId);
@@ -170,13 +181,73 @@ export async function aiUsage(tenantId: string): Promise<{ month: string; used: 
   return { month, used: row?.tokens ?? 0, calls: row?.calls ?? 0 };
 }
 
-/** Before an AI call: the plan must be running and this month's tokens not used up. */
+// ---------- Munshi AI allowance (rupees, per day) ----------
+//
+// Each plan has a monthly AI budget in rupees (Admin → Settings; ₹999 plan ₹200,
+// ₹2,999 plan ₹990, free trial ₹84.15 ≈ 2,00,000 tokens a day at ₹93.5/$). Like Claude's limits it is handed out per
+// day: budget ÷ 30, fresh every midnight (India time), unused doesn't carry
+// over. Everything AI counts: Munshi chat, speech-to-text, the voice, setup.
+// Businesses see only percentages, never rupees.
+
+const IST_MS = 330 * 60_000;
+const istDay = (d = new Date()) => new Date(d.getTime() + IST_MS).toISOString().slice(0, 10);
+
+/** Next midnight in India. */
+export function aiResetsAt(now = new Date()): Date {
+  const ist = new Date(now.getTime() + IST_MS);
+  return new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + 1) - IST_MS);
+}
+
+export interface AiAllowance {
+  unlimited: boolean;
+  /** Plan ended: no AI. */
+  ended: boolean;
+  monthlyInr: number;
+  dailyInr: number;
+  todayInr: number;
+  monthInr: number;
+  todayPct: number;
+  monthPct: number;
+  exhausted: boolean;
+  resetsAt: Date;
+}
+
+export function dailyAllowanceInr(state: PlanState, budgets: AiBudgets): number {
+  return state.aiBudgetKey ? budgets[state.aiBudgetKey] / 30 : 0;
+}
+
+export async function aiAllowance(tenantId: string): Promise<AiAllowance> {
+  const [state, budgets] = await Promise.all([getPlanState(tenantId), getAiBudgets()]);
+  const tid = new Types.ObjectId(tenantId);
+  const [today, month] = await Promise.all([
+    AiCall.aggregate([{ $match: { tenantId: tid, day: istDay() } }, { $group: { _id: null, inr: { $sum: "$costInr" } } }]),
+    AiCall.aggregate([{ $match: { tenantId: tid, month: usageMonth() } }, { $group: { _id: null, inr: { $sum: "$costInr" } } }]),
+  ]);
+  const monthlyInr = state.aiBudgetKey ? budgets[state.aiBudgetKey] : 0;
+  const dailyInr = monthlyInr / 30;
+  const todayInr = today[0]?.inr ?? 0;
+  const monthInr = month[0]?.inr ?? 0;
+  const pct = (used: number, of: number) => (of > 0 ? Math.min(100, Math.round((used / of) * 100)) : 100);
+  return {
+    unlimited: state.aiUnlimited,
+    ended: state.status === "expired",
+    monthlyInr,
+    dailyInr,
+    todayInr,
+    monthInr,
+    todayPct: state.aiUnlimited ? 0 : pct(todayInr, dailyInr),
+    monthPct: state.aiUnlimited ? 0 : pct(monthInr, monthlyInr),
+    exhausted: !state.aiUnlimited && (state.status === "expired" || todayInr >= dailyInr),
+    resetsAt: aiResetsAt(),
+  };
+}
+
+/** Before an AI call: the plan must be running and today's AI allowance not used up. */
 export async function assertAiTokens(tenantId: string): Promise<void> {
-  const state = await getPlanState(tenantId);
-  if (state.status === "expired") throw new PlanError("PLAN_EXPIRED", "Your plan has ended. Choose a plan to continue.");
-  const { used } = await aiUsage(tenantId);
-  if (used >= state.aiTokenLimit) {
-    throw new PlanError("AI_LIMIT", "This month's Munshi AI tokens are used up.", { used, limit: state.aiTokenLimit });
+  const allowance = await aiAllowance(tenantId);
+  if (allowance.ended && !allowance.unlimited) throw new PlanError("PLAN_EXPIRED", "Your plan has ended. Choose a plan to continue.");
+  if (allowance.exhausted) {
+    throw new PlanError("AI_LIMIT", "Today's Munshi AI is used up. It refills at midnight.", { resetsAt: allowance.resetsAt.toISOString(), todayPct: 100 });
   }
 }
 
@@ -194,4 +265,20 @@ export async function recordAiTokens(
     { $inc: { tokens, calls: 1 } },
     { upsert: true }
   );
+}
+
+/** Today's AI spend for a business, grouped the way people think of it. */
+export async function aiTodayByUse(tenantId: string): Promise<{ questions: number; speaking: number; voice: number; other: number }> {
+  const rows = await AiCall.aggregate([
+    { $match: { tenantId: new Types.ObjectId(tenantId), day: new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10) } },
+    { $group: { _id: "$kind", inr: { $sum: "$costInr" } } },
+  ]);
+  const out = { questions: 0, speaking: 0, voice: 0, other: 0 };
+  for (const r of rows) {
+    if (r._id === "chat" || r._id === "ask") out.questions += r.inr;
+    else if (r._id === "stt" || r._id === "stt_live" || r._id === "stt_cleanup") out.speaking += r.inr;
+    else if (r._id === "tts") out.voice += r.inr;
+    else out.other += r.inr;
+  }
+  return out;
 }

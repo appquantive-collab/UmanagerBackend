@@ -3,7 +3,7 @@ import { getTtsSettings } from "../../models/PlatformSetting";
 import { DEFAULT_SARVAM_VOICE, SARVAM_VOICES, type SarvamVoiceKey, sarvamSpeak, sarvamTtsAvailable } from "./sarvam-tts.service";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import { env } from "../../config/env";
-import { GROQ_CHAT_MODEL, getGroqClient } from "../../config/groq";
+import { GROQ_CHAT_MODEL, GROQ_FALLBACK_MODEL, getGroqClient } from "../../config/groq";
 
 // Munshi AI's voice: free Microsoft Edge "Read aloud" neural voices via the
 // msedge-tts library (no API key). It's an unofficial use of that service and
@@ -45,13 +45,31 @@ Spoken: "रवि जी के बिल के लिए जीएसटी �
 Screen: "Aaj ki bikri **₹15,316** hui hai. Sabse zyada udhaar **Gupta General Store** par hai."
 Spoken: "आज की बिक्री 15,316 रुपये हुई है। सबसे ज़्यादा उधार गुप्ता जनरल स्टोर पर है।"`;
 
-export async function toDevanagari(text: string): Promise<string | null> {
-  const cached = scriptCache.get(text);
-  if (cached) return cached;
-  if (!env.groqApiKey) return null;
-  try {
-    const response = await getGroqClient().chat.completions.create({
-      model: GROQ_CHAT_MODEL,
+/** Share of letters still in Roman script (0 = all Devanagari). */
+function latinShare(text: string): number {
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  const deva = (text.match(/[ऀ-ॿ]/g) ?? []).length;
+  return latin + deva === 0 ? 0 : latin / (latin + deva);
+}
+
+/**
+ * Text already in Devanagari (Hindi replies) needs no AI: only the symbols a
+ * voice can't read become words. Saves a whole AI round trip for Hindi.
+ */
+function spokenHindiByRules(text: string): string {
+  return text
+    .replace(/₹\s?([\d,]+(?:\.\d+)?)/g, "$1 रुपये")
+    .replace(/(\d)\s?%/g, "$1 प्रतिशत")
+    .replace(/\s&\s/g, " और ")
+    .replace(/[()[\]{}]/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+async function convertWith(model: string, text: string, timeout: number, maxLatin: number): Promise<string | null> {
+  const response = await getGroqClient().chat.completions.create(
+    {
+      model,
       reasoning_effort: "low",
       temperature: 0.1,
       max_completion_tokens: 1200,
@@ -59,21 +77,44 @@ export async function toDevanagari(text: string): Promise<string | null> {
         { role: "system", content: DEVANAGARI_PROMPT },
         { role: "user", content: text },
       ],
-    }, { timeout: 6000, maxRetries: 0 });
-    void logAiCall({ kind: "tts", model: response.model ?? "openai/gpt-oss-120b", usage: response.usage });
-    const converted = response.choices[0]?.message?.content?.trim();
-    // Must be mostly Devanagari, and not wildly longer/shorter than the input.
-    if (!converted || !/[ऀ-ॿ]/.test(converted) || converted.length > text.length * 2 + 20) return null;
-    scriptCache.set(text, converted);
-    if (scriptCache.size > SCRIPT_CACHE_MAX) {
-      const oldest = scriptCache.keys().next().value;
-      if (oldest !== undefined) scriptCache.delete(oldest);
+    },
+    { timeout, maxRetries: 0 }
+  );
+  void logAiCall({ kind: "tts", model: response.model ?? model, usage: response.usage });
+  const converted = response.choices[0]?.message?.content?.trim();
+  // Must be (almost) all Devanagari, and not wildly longer/shorter than the input.
+  if (!converted || latinShare(converted) > maxLatin || converted.length > text.length * 2 + 20) return null;
+  return converted;
+}
+
+export async function toDevanagari(text: string): Promise<string | null> {
+  const cached = scriptCache.get(text);
+  if (cached) return cached;
+  let converted: string | null = null;
+  if (!/[A-Za-z]/.test(text)) converted = spokenHindiByRules(text);
+  else if (env.groqApiKey) {
+    // The small model answers in ~0.25s (the big one ~0.65s) but now and then
+    // leaves words in Roman letters; then the big one does it properly.
+    // Bill numbers and codes (INV-0012) may stay in Roman letters, so the last try is lenient.
+    for (const [model, timeout, maxLatin] of [
+      [GROQ_FALLBACK_MODEL, 3000, 0.12],
+      [GROQ_CHAT_MODEL, 6000, 0.4],
+    ] as const) {
+      try {
+        converted = await convertWith(model, text, timeout, maxLatin);
+        if (converted) break;
+      } catch (err) {
+        console.error(`[tts] Hinglish → Devanagari (${model}) failed:`, (err as Error).message);
+      }
     }
-    return converted;
-  } catch (err) {
-    console.error("[tts] Hinglish → Devanagari failed:", (err as Error).message);
-    return null;
   }
+  if (!converted) return null;
+  scriptCache.set(text, converted);
+  if (scriptCache.size > SCRIPT_CACHE_MAX) {
+    const oldest = scriptCache.keys().next().value;
+    if (oldest !== undefined) scriptCache.delete(oldest);
+  }
+  return converted;
 }
 
 const FORMAT = OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3;

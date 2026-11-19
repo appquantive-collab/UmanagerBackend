@@ -1,3 +1,5 @@
+import { currentTenantId } from "../billing/ai-cost.service";
+import { aiAllowance } from "../billing/subscription.service";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -59,6 +61,14 @@ munshiRouter.post("/transcribe/live", liveTranscribeLimit, audioUpload.single("a
 async function transcribeHandler(req: Request, res: Response) {
   const parsed = transcribeSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  // A signed-in business that used up today's AI allowance (welcome-screen visitors are free, rate-limited).
+  const tenantId = currentTenantId();
+  if (tenantId) {
+    const allowance = await aiAllowance(tenantId);
+    if (allowance.exhausted) {
+      return res.status(402).json({ error: "Today's Munshi AI is used up. It refills at midnight.", code: "AI_LIMIT", details: { resetsAt: allowance.resetsAt } });
+    }
+  }
   if (!req.file || req.file.size === 0) return res.status(400).json({ error: "No audio received." });
 
   try {

@@ -40,9 +40,17 @@ export const refreshSchema = z.object({
   refreshToken: z.string().min(1),
 });
 
-export const updateProfileSchema = z.object({
-  preferredLanguage: z.enum(["en", "hi", "hi-Latn"]).optional(),
-});
+/** The signed-in person's own details. Blank email / mobile clears it (one of the two must stay). */
+export const updateProfileSchema = z
+  .object({
+    preferredLanguage: z.enum(["en", "hi", "hi-Latn"]).optional(),
+    name: z.string().trim().min(2).max(80).optional(),
+    email: z.union([z.literal(""), z.string().trim().toLowerCase().email()]).optional(),
+    phone: z.union([z.literal(""), z.string().trim().regex(/^\d{10}$/, "Enter a valid 10-digit mobile number")]).optional(),
+    currentPassword: z.string().optional(),
+    newPassword: z.string().min(8).optional(),
+  })
+  .strict();
 
 export const googleSignInSchema = z.object({
   credential: z.string().min(20),

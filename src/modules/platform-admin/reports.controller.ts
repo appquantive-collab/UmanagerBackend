@@ -9,7 +9,11 @@ import { Purchase } from "../../models/Purchase";
 import { SubscriptionPayment } from "../../models/SubscriptionPayment";
 import { Tenant } from "../../models/Tenant";
 import { User } from "../../models/User";
-import { DEFAULT_PRICING, estimateTokensInr, getPricing, setPricing, type Pricing } from "../billing/ai-cost.service";
+import { DEFAULT_PRICING, GROQ_PRICES_CHECKED, averageCostByKind, clearPriceCache, estimateTokensInr, getPricing, setPricing, type Pricing } from "../billing/ai-cost.service";
+import { liveUsdToInr, refreshUsdToInr } from "../billing/exchange-rate.service";
+import { AuditLog } from "../../models/AuditLog";
+import { DEFAULT_AI_BUDGETS, getAiBudgets, setAiBudgets } from "../../models/PlatformSetting";
+import { aiAllowance } from "../billing/subscription.service";
 import { usageMonth } from "../billing/subscription.service";
 
 /**
@@ -239,6 +243,17 @@ reportsRouter.get("/businesses/:id/activity", async (req, res) => {
   const monthMap = await monthCosts(usageMonth(), pricing);
   const thisMonth = monthMap.get(String(tid));
 
+  // AI allowance: last 30 days against the daily allowance, by login, the latest calls, and the activity log.
+  const [allowance, aiDaily, aiByUser, recentCalls, audit] = await Promise.all([
+    aiAllowance(String(tid)),
+    AiCall.aggregate([{ $match: { tenantId: tid, day: { $gte: days[0] } } }, { $group: { _id: "$day", inr: { $sum: "$costInr" }, calls: { $sum: 1 } } }]),
+    AiCall.aggregate([{ $match: { tenantId: tid, month: usageMonth() } }, { $group: { _id: "$userId", inr: { $sum: "$costInr" }, calls: { $sum: 1 } } }, { $sort: { inr: -1 } }]),
+    AiCall.find({ tenantId: tid }, { at: 1, kind: 1, model: 1, provider: 1, costInr: 1, userId: 1, audioSeconds: 1, characters: 1, inputTokens: 1, outputTokens: 1 }).sort({ at: -1 }).limit(40).lean(),
+    AuditLog.find({ tenantId: tid }, { userName: 1, action: 1, summary: 1, amount: 1, createdAt: 1 }).sort({ createdAt: -1 }).limit(50).lean(),
+  ]);
+  const userIds = [...new Set([...aiByUser.map((u) => String(u._id)), ...recentCalls.map((c) => String(c.userId))].filter((id) => id && id !== "null"))];
+  const names = new Map((await User.find({ _id: { $in: userIds } }, { name: 1, role: 1 }).lean()).map((u) => [String(u._id), `${u.name}`]));
+
   res.json({
     daily: daily.map((d) => ({ ...d, sales: Math.round(d.sales), purchases: Math.round(d.purchases) })),
     totals30: {
@@ -274,8 +289,65 @@ reportsRouter.get("/businesses/:id/activity", async (req, res) => {
         // Months before per-call logging: estimate from the token total.
         return { month, inr: round(logged || estimateTokensInr(tokens, pricing)), estimated: !logged && tokens > 0 };
       }),
+      allowance: {
+        unlimited: allowance.unlimited,
+        monthlyInr: round(allowance.monthlyInr),
+        dailyInr: round(allowance.dailyInr),
+        todayInr: round(allowance.todayInr, 3),
+        todayPct: allowance.todayPct,
+        monthPct: allowance.monthPct,
+        exhausted: allowance.exhausted,
+      },
+      daily: days.map((day) => {
+        const row = aiDaily.find((d) => d._id === day);
+        return { day, inr: round(row?.inr ?? 0, 3), calls: row?.calls ?? 0 };
+      }),
+      byUser: aiByUser.map((u) => ({ userId: u._id ? String(u._id) : null, name: u._id ? (names.get(String(u._id)) ?? "Deleted login") : "No login (system)", inr: round(u.inr, 3), calls: u.calls })),
+      recentCalls: recentCalls.map((c) => ({
+        at: c.at,
+        kind: c.kind,
+        model: c.model,
+        provider: c.provider,
+        inr: round(c.costInr, 4),
+        user: c.userId ? (names.get(String(c.userId)) ?? null) : null,
+        detail: c.audioSeconds ? `${Math.round(c.audioSeconds)}s audio` : c.characters ? `${c.characters} chars` : c.inputTokens || c.outputTokens ? `${c.inputTokens + c.outputTokens} tokens` : "",
+      })),
     },
+    activity: audit.map((a) => ({ at: a.createdAt, user: a.userName, action: a.action, summary: a.summary, amount: a.amount ?? null })),
   });
+});
+
+// ---------- Plan AI budgets (rupees a month per plan; given out per day) ----------
+
+reportsRouter.get("/ai-budgets", async (_req, res) => {
+  const [budgets, avg] = await Promise.all([getAiBudgets(), averageCostByKind()]);
+  const pricing = await getPricing();
+  // What one unit of each kind costs (measured where there's data, else list-price estimates).
+  const unit = {
+    chatMessage: avg.chat ?? 0.07,
+    sarvamSpeechMinute: pricing.sarvamPerMinuteInr,
+    whisperSpeechMinute: ((pricing.whisperPerHourUsd["whisper-large-v3"] ?? 0.111) / 60) * pricing.usdToInr,
+    voiceReply: ((avg.tts ?? 0) > 0 ? avg.tts : 0.3) as number,
+  };
+  const per = (rupeesPerDay: number) => ({
+    chatMessages: Math.floor(rupeesPerDay / unit.chatMessage),
+    sarvamSpeechMinutes: round(rupeesPerDay / unit.sarvamSpeechMinute, 1),
+    whisperSpeechMinutes: Math.floor(rupeesPerDay / unit.whisperSpeechMinute),
+    voiceReplies: Math.floor(rupeesPerDay / unit.voiceReply),
+  });
+  res.json({
+    budgets,
+    defaults: DEFAULT_AI_BUDGETS,
+    unitCostInr: Object.fromEntries(Object.entries(unit).map(([k, v]) => [k, round(v, 4)])),
+    measured: Object.keys(avg),
+    perDay: Object.fromEntries((Object.keys(budgets) as (keyof typeof budgets)[]).map((k) => [k, { rupees: round(budgets[k] / 30), ...per(budgets[k] / 30) }])),
+  });
+});
+
+reportsRouter.put("/ai-budgets", async (req, res) => {
+  const parsed = z.object({ basic: z.number().min(0).max(100000), pro: z.number().min(0).max(100000), trial: z.number().min(0).max(100000) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  res.json({ budgets: await setAiBudgets(parsed.data) });
 });
 
 /** ₹ this month for every business (for the businesses list). */
@@ -288,6 +360,7 @@ reportsRouter.get("/costs/by-business", async (_req, res) => {
 
 const pricingSchema = z.object({
   usdToInr: z.number().positive().max(1000),
+  usdToInrAuto: z.boolean().default(true),
   tokens: z.record(z.string(), z.object({ input: z.number().min(0), cachedInput: z.number().min(0), output: z.number().min(0) })),
   whisperPerHourUsd: z.record(z.string(), z.number().min(0)),
   whisperMinSeconds: z.number().min(0).max(120),
@@ -295,12 +368,28 @@ const pricingSchema = z.object({
   sarvamTtsPer1kInr: z.record(z.string(), z.number().min(0)).default({}),
 });
 
+const pricingView = async () => ({
+  pricing: await getPricing(),
+  defaults: DEFAULT_PRICING,
+  fx: await liveUsdToInr().catch(() => null),
+  groqPricesChecked: GROQ_PRICES_CHECKED,
+  sources: { groq: "https://console.groq.com/docs/models" },
+});
+
 reportsRouter.get("/pricing", async (_req, res) => {
-  res.json({ pricing: await getPricing(), defaults: DEFAULT_PRICING });
+  res.json(await pricingView());
+});
+
+/** Fetch today's USD → INR rate now. */
+reportsRouter.post("/pricing/refresh-rate", async (_req, res) => {
+  await refreshUsdToInr();
+  clearPriceCache();
+  res.json(await pricingView());
 });
 
 reportsRouter.put("/pricing", async (req, res) => {
   const parsed = pricingSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  res.json({ pricing: await setPricing(parsed.data) });
+  await setPricing(parsed.data);
+  res.json(await pricingView());
 });

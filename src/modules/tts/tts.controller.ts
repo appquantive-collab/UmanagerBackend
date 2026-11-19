@@ -1,3 +1,5 @@
+import { currentTenantId } from "../billing/ai-cost.service";
+import { aiAllowance } from "../billing/subscription.service";
 import { Router } from "express";
 import { z } from "zod";
 import { ipRateLimit } from "../../middleware/ipRateLimit";
@@ -19,6 +21,11 @@ const limit = ipRateLimit({ perIp: 40, total: 600, message: "Too many voice requ
 ttsRouter.post("/", limit, async (req, res) => {
   const parsed = ttsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  // Allowance used up: no paid voice; the app falls back to the phone's own free voice.
+  const tenantId = currentTenantId();
+  if (tenantId && (await aiAllowance(tenantId)).exhausted) {
+    return res.status(402).json({ error: "Today's Munshi AI is used up.", code: "AI_LIMIT" });
+  }
 
   try {
     const audio = await synthesize(parsed.data.text, parsed.data.lang);

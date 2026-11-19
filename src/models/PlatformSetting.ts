@@ -18,6 +18,10 @@ export interface PlatformSettingDocument {
   ttsVoice: string;
   /** AI price list for the cost report (see billing/ai-cost.service). */
   pricing?: Record<string, unknown> | null;
+  /** Munshi AI rupees a month per plan (see getAiBudgets). */
+  aiBudgets?: Record<string, number> | null;
+  /** Last live USD → INR rate (see billing/exchange-rate.service). */
+  fxRate?: { rate: number; asOf: string; source: string; fetchedAt: string } | null;
   updatedAt: Date;
 }
 
@@ -27,7 +31,9 @@ const platformSettingSchema = new Schema<PlatformSettingDocument>(
     sttEngine: { type: String, enum: ["auto", "sarvam", "whisper"], default: "auto" },
     ttsEngine: { type: String, enum: ["auto", "sarvam", "edge"], default: "auto" },
     ttsVoice: { type: String, default: "v3_shubh" },
+    aiBudgets: { type: Schema.Types.Mixed, default: null },
     pricing: { type: Schema.Types.Mixed, default: null },
+    fxRate: { type: Schema.Types.Mixed, default: null },
   },
   { timestamps: { createdAt: false, updatedAt: true } }
 );
@@ -68,4 +74,29 @@ export async function setTtsSettings(patch: { engine?: TtsEngine; voice?: string
   await PlatformSetting.updateOne({ key: "global" }, { $set: set }, { upsert: true });
   ttsCached = null;
   return getTtsSettings();
+}
+
+/** Munshi AI budget in rupees per month, per plan (the daily allowance is this ÷ 30). */
+export interface AiBudgets {
+  basic: number;
+  pro: number;
+  trial: number;
+}
+
+export const DEFAULT_AI_BUDGETS: AiBudgets = { basic: 200, pro: 990, trial: 84.15 };
+
+let budgetsCached: { budgets: AiBudgets; at: number } | null = null;
+
+export async function getAiBudgets(): Promise<AiBudgets> {
+  if (budgetsCached && Date.now() - budgetsCached.at < CACHE_MS) return budgetsCached.budgets;
+  const doc = await PlatformSetting.findOne({ key: "global" }, { aiBudgets: 1 }).lean();
+  const saved = (doc as { aiBudgets?: Partial<AiBudgets> } | null)?.aiBudgets ?? {};
+  budgetsCached = { budgets: { ...DEFAULT_AI_BUDGETS, ...saved }, at: Date.now() };
+  return budgetsCached.budgets;
+}
+
+export async function setAiBudgets(budgets: AiBudgets): Promise<AiBudgets> {
+  await PlatformSetting.updateOne({ key: "global" }, { $set: { aiBudgets: budgets } }, { upsert: true });
+  budgetsCached = { budgets, at: Date.now() };
+  return budgets;
 }

@@ -1,3 +1,6 @@
+import { AiCall } from "../../models/AiCall";
+import { getAiBudgets } from "../../models/PlatformSetting";
+import { dailyAllowanceInr } from "../billing/subscription.service";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import mongoose from "mongoose";
 import { z } from "zod";
@@ -110,9 +113,12 @@ adminRouter.get("/businesses", async (req, res) => {
     .limit(300)
     .lean();
   const ids = tenants.map((t) => t._id);
-  const [users, usage] = await Promise.all([
+  const today = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+  const [users, usage, todaySpend, budgets] = await Promise.all([
     User.find({ tenantId: { $in: ids } }, { tenantId: 1, name: 1, email: 1, phone: 1, role: 1, lastSeenAt: 1 }).lean(),
     AiUsage.find({ tenantId: { $in: ids }, month: usageMonth() }).lean(),
+    AiCall.aggregate([{ $match: { tenantId: { $in: ids }, day: today } }, { $group: { _id: "$tenantId", inr: { $sum: "$costInr" } } }]),
+    getAiBudgets(),
   ]);
   const rows = tenants.map((t) => {
     const team = users.filter((u) => String(u.tenantId) === String(t._id));
@@ -133,6 +139,13 @@ adminRouter.get("/businesses", async (req, res) => {
       state,
       aiTokensUsed: usage.find((u) => String(u.tenantId) === String(t._id))?.tokens ?? 0,
       aiTokenLimitOverride: t.subscription?.aiTokenLimit ?? null,
+      // Today's Munshi AI against the daily allowance (percent; null = unlimited).
+      aiTodayPct: (() => {
+        if (state.aiUnlimited) return null;
+        const daily = dailyAllowanceInr(state, budgets);
+        const spent = todaySpend.find((r) => String(r._id) === String(t._id))?.inr ?? 0;
+        return daily > 0 ? Math.min(100, Math.round((spent / daily) * 100)) : 100;
+      })(),
     };
   });
   const filtered = rows.filter((r) =>
