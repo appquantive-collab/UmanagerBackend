@@ -137,7 +137,7 @@ function hashOtp(phone: string, code: string): string {
   return createHmac("sha256", env.jwt.accessSecret).update(`${phone}:${code}`).digest("hex");
 }
 
-export async function requestLoginOtp(phone: string) {
+export async function requestLoginOtp(phone: string, siteHost: string | null = null) {
   const user = await User.findOne({ phone, isActive: true, ...BUSINESS_USER });
   if (!user) {
     throw new OtpError("No account found for this mobile number", "NO_ACCOUNT", 404);
@@ -187,7 +187,9 @@ export async function requestLoginOtp(phone: string) {
   }
 
   try {
-    await sendSms(phone, `${code} is your VoiceMunshi login code. It expires in 5 minutes. Do not share it with anyone.`);
+    // The last line lets Android Chrome read the code straight into the app (WebOTP); iPhones offer it from the SMS.
+    const webOtp = siteHost ? `\n\n@${siteHost} #${code}` : "";
+    await sendSms(phone, `${code} is your VoiceMunshi login code. It expires in 5 minutes. Do not share it with anyone.${webOtp}`);
   } catch (err) {
     // The send counter is kept so a failing provider can't be hammered, but the unsent code must not stay valid.
     await PhoneOtp.updateOne({ phone }, { expiresAt: new Date(0) });

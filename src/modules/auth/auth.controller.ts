@@ -1,3 +1,4 @@
+import { env } from "../../config/env";
 import { Router } from "express";
 import type { Response } from "express";
 import {
@@ -74,6 +75,25 @@ function sendOtpError(res: Response, err: unknown) {
   return res.status(500).json({ error: "Something went wrong. Please try again." });
 }
 
+/** Public sign-in settings for the web app (an OAuth client ID is not a secret). */
+authRouter.get("/config", (_req, res) => {
+  res.set("Cache-Control", "public, max-age=300");
+  res.json({ googleClientId: env.googleClientId });
+});
+
+/**
+ * The site asking for the code, so the SMS can end with "@site #123456" and
+ * Android Chrome fills it in by itself (WebOTP). Only our own sites count.
+ */
+function otpSiteHost(origin: string | undefined): string | null {
+  if (!origin || !env.corsOrigins.includes(origin)) return null;
+  try {
+    return new URL(origin).host;
+  } catch {
+    return null;
+  }
+}
+
 authRouter.post("/otp/request", async (req, res) => {
   const parsed = otpRequestSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -81,7 +101,7 @@ authRouter.post("/otp/request", async (req, res) => {
   }
 
   try {
-    return res.json(await requestLoginOtp(parsed.data.phone));
+    return res.json(await requestLoginOtp(parsed.data.phone, otpSiteHost(req.headers.origin)));
   } catch (err) {
     return sendOtpError(res, err);
   }
