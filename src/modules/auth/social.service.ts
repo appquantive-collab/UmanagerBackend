@@ -18,7 +18,9 @@ export class SocialAuthError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    readonly code: "NOT_CONFIGURED" | "INVALID_TOKEN" | "EMAIL_UNVERIFIED" | "SIGNUP_EXPIRED"
+    readonly code: "NOT_CONFIGURED" | "INVALID_TOKEN" | "EMAIL_UNVERIFIED" | "SIGNUP_EXPIRED",
+    /** Why a token was rejected (e.g. "jwt audience invalid"), for fixing setup; no secrets in it. */
+    readonly reason?: string
   ) {
     super(message);
     this.name = "SocialAuthError";
@@ -54,7 +56,8 @@ async function verifyProviderToken(provider: SocialProvider, token: string, name
           });
   } catch (err) {
     console.error(`[auth:${provider}] token rejected:`, (err as Error).message);
-    throw new SocialAuthError("We couldn't verify that sign-in. Please try again.", 401, "INVALID_TOKEN");
+    // jsonwebtoken's messages ("jwt audience invalid. expected: …") only name public client IDs.
+    throw new SocialAuthError("We couldn't verify that sign-in. Please try again.", 401, "INVALID_TOKEN", (err as Error).message.slice(0, 200));
   }
 
   const verified = claims.email_verified === true || claims.email_verified === "true";

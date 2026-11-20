@@ -178,7 +178,7 @@ authRouter.post("/refresh", async (req, res) => {
 const socialLimit = ipRateLimit({ perIp: 20, total: 400, message: "Too many sign-in attempts. Please wait a minute." });
 
 function sendSocialError(res: Response, err: unknown) {
-  if (err instanceof SocialAuthError) return res.status(err.status).json({ error: err.message, code: err.code });
+  if (err instanceof SocialAuthError) return res.status(err.status).json({ error: err.message, code: err.code, ...(err.reason ? { reason: err.reason } : {}) });
   if (err instanceof AccountExistsError) return res.status(409).json({ error: err.message, code: err.code });
   console.error("[auth:social] unexpected error:", err);
   return res.status(500).json({ error: "Something went wrong. Please try again." });
